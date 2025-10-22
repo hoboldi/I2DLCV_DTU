@@ -1,6 +1,7 @@
 
 # Ignore hotdog_nothotdog dataset
 hotdog_nothotdog/
+/Project2/ufc10/
 
 # Ignore PyTorch model files
 *.pth

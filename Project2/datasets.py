@@ -7,10 +7,9 @@ from torchvision import transforms as T
 
 class FrameImageDataset(torch.utils.data.Dataset):
     def __init__(self, 
-    root_dir='/work3/ppar/data/ucf101',
+    root_dir='/dtu/datasets1/02516/ucf101_noleakage',
     split='train', 
-    transform=None
-):
+    transform=None):
         self.frame_paths = sorted(glob(f'{root_dir}/frames/{split}/*/*/*.jpg'))
         self.df = pd.read_csv(f'{root_dir}/metadata/{split}.csv')
         self.split = split
@@ -40,19 +39,24 @@ class FrameImageDataset(torch.utils.data.Dataset):
 
 class FrameVideoDataset(torch.utils.data.Dataset):
     def __init__(self, 
-    root_dir = '/work3/ppar/data/ucf101', 
+    root_dir = '/dtu/datasets1/02516/ucf101_noleakage', 
     split = 'train', 
     transform = None,
-    stack_frames = True
-):
-
+    stack_frames = True,
+    use_flow = False,
+    flow_root = None,
+    n_sampled_frames = 10
+    ):
         self.video_paths = sorted(glob(f'{root_dir}/videos/{split}/*/*.avi'))
         self.df = pd.read_csv(f'{root_dir}/metadata/{split}.csv')
         self.split = split
         self.transform = transform
         self.stack_frames = stack_frames
         
-        self.n_sampled_frames = 10
+        self.n_sampled_frames = n_sampled_frames
+        # flow-related
+        self.use_flow = use_flow
+        self.flow_root = flow_root
 
     def __len__(self):
         return len(self.video_paths)
@@ -68,7 +72,6 @@ class FrameVideoDataset(torch.utils.data.Dataset):
 
         video_frames_dir = self.video_paths[idx].split('.avi')[0].replace('videos', 'frames')
         video_frames = self.load_frames(video_frames_dir)
-
         if self.transform:
             frames = [self.transform(frame) for frame in video_frames]
         else:
@@ -76,7 +79,6 @@ class FrameVideoDataset(torch.utils.data.Dataset):
         
         if self.stack_frames:
             frames = torch.stack(frames).permute(1, 0, 2, 3)
-
 
         return frames, label
     
@@ -90,10 +92,117 @@ class FrameVideoDataset(torch.utils.data.Dataset):
         return frames
 
 
+class FlowImageDataset(torch.utils.data.Dataset):
+    """Dataset treating each optical-flow image as a sample.
+
+    Expects flow images under: {root_dir}/flows/{split}/... (any depth)
+    Supports .png and .jpg extensions. Metadata lookup uses the same
+    metadata/{split}.csv and expects a `video_name` column to map labels.
+    """
+    def __init__(self, root_dir='/work3/ppar/data/ucf101', split='train', transform=None):
+        # find common flow image extensions recursively
+        pngs = glob(f'{root_dir}/flows/{split}/**/*.png', recursive=True)
+        jpgs = glob(f'{root_dir}/flows/{split}/**/*.jpg', recursive=True)
+        self.flow_paths = sorted(pngs + jpgs)
+        self.df = pd.read_csv(f'{root_dir}/metadata/{split}.csv')
+        self.split = split
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.flow_paths)
+
+    def _get_meta(self, attr, value):
+        return self.df.loc[self.df[attr] == value]
+
+    def __getitem__(self, idx):
+        flow_path = self.flow_paths[idx]
+        # assume video_name is the parent folder of the flow image
+        video_name = os.path.basename(os.path.dirname(flow_path))
+        video_meta = self._get_meta('video_name', video_name)
+        label = video_meta['label'].item()
+
+        img = Image.open(flow_path).convert('RGB')
+        if self.transform:
+            img = self.transform(img)
+        else:
+            img = T.ToTensor()(img)
+
+        return img, label
+
+
+class FlowVideoDataset(torch.utils.data.Dataset):
+    """Dataset treating each video as a sequence of flow images.
+
+    It looks for flow frames under videos' equivalent frames directory by
+    replacing 'videos' with 'flows' in the path (same convention as existing
+    FrameVideoDataset). It will try to collect up to n_sampled_frames images;
+    if fewer exist, the last available frame will be repeated to reach the
+    requested count.
+    """
+    def __init__(self, root_dir='/work3/ppar/data/ucf101', split='train', transform=None, stack_frames=True, n_sampled_frames=10):
+        self.video_paths = sorted(glob(f'{root_dir}/videos/{split}/*/*.avi'))
+        self.df = pd.read_csv(f'{root_dir}/metadata/{split}.csv')
+        self.split = split
+        self.transform = transform
+        self.stack_frames = stack_frames
+        self.n_sampled_frames = n_sampled_frames
+
+    def __len__(self):
+        return len(self.video_paths)
+
+    def _get_meta(self, attr, value):
+        return self.df.loc[self.df[attr] == value]
+
+    def __getitem__(self, idx):
+        video_path = self.video_paths[idx]
+        video_name = os.path.splitext(os.path.basename(video_path))[0]
+        video_meta = self._get_meta('video_name', video_name)
+        label = video_meta['label'].item()
+
+        # build corresponding flows directory path
+        video_frames_dir = self.video_paths[idx].split('.avi')[0].replace('videos', 'flows')
+        flow_images = self.load_flows(video_frames_dir)
+
+        if self.transform:
+            frames = [self.transform(img) for img in flow_images]
+        else:
+            frames = [T.ToTensor()(img) for img in flow_images]
+
+        if self.stack_frames:
+            frames = torch.stack(frames).permute(1, 0, 2, 3)
+
+        return frames, label
+
+    def load_flows(self, flows_dir):
+        # collect png/jpg, sort and take/sample up to n_sampled_frames
+        pngs = sorted(glob(os.path.join(flows_dir, '*.png')))
+        jpgs = sorted(glob(os.path.join(flows_dir, '*.jpg')))
+        files = sorted(pngs + jpgs)
+
+        if len(files) == 0:
+            raise FileNotFoundError(f'No flow images found in {flows_dir}')
+
+        # pick first n_sampled_frames (or sample uniformly if more available)
+        if len(files) >= self.n_sampled_frames:
+            chosen = files[:self.n_sampled_frames]
+        else:
+            # repeat the last frame to pad
+            chosen = list(files)
+            last = files[-1]
+            while len(chosen) < self.n_sampled_frames:
+                chosen.append(last)
+
+        flows = []
+        for f in chosen:
+            img = Image.open(f).convert('RGB')
+            flows.append(img)
+
+        return flows
+
 if __name__ == '__main__':
     from torch.utils.data import DataLoader
 
-    root_dir = '/work3/ppar/data/ucf101'
+    root_dir = '/dtu/datasets1/02516/ucf101_noleakage'
 
     transform = T.Compose([T.Resize((64, 64)),T.ToTensor()])
     frameimage_dataset = FrameImageDataset(root_dir=root_dir, split='val', transform=transform)

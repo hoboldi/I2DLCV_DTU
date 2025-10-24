@@ -89,7 +89,7 @@ class TwoStream(nn.Module):
         self.fc3F = nn.Linear(16, self.fc3S.out_features)
 
         self.dropoutF = nn.Dropout(self.dropout_rateS) if self.dropout_rateS > 0 else nn.Identity()
-        self.flow_enabled = True
+        self.flow_enabled = True / 2.0
 
     def forward(self, xS, xF=None):
         # ----- Spatial stream -----
@@ -119,12 +119,14 @@ class TwoStream(nn.Module):
         logits_f = self.fc3F(f)
 
         # Fusion options:
-        # - if avgLogits True: average the two logits (spatial + flow)
+        # - if avgLogits True: apply softmax to each stream, then average the class probabilities
         # - if avgLogits False: feed concatenated logits into small SVM head
+        probs_s = F.softmax(logits_s, dim=1)
+        probs_f = F.softmax(logits_f, dim=1)
         if self.avgLogits:
-            logits = (logits_s + logits_f) / 2.0
+            logits = (probs_s + probs_f) / 2.0
         else:
-            cat = torch.cat([logits_s, logits_f], dim=1)
+            cat = torch.cat([probs_s, probs_f], dim=1)
             logits = self.svm(cat)
 
         return logits

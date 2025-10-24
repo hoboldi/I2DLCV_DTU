@@ -5,6 +5,7 @@ from PIL import Image
 import torch
 from torchvision import transforms as T
 import numpy as np
+import torch.nn.functional as F
 
 class FrameImageDataset(torch.utils.data.Dataset):
     def __init__(self, 
@@ -63,6 +64,7 @@ class FrameImageDataset(torch.utils.data.Dataset):
         label = video_meta['label'].item()
         
         frame = Image.open(frame_path).convert("RGB")
+        orig_w, orig_h = frame.size
 
         if self.transform:
             frame = self.transform(frame)
@@ -104,6 +106,28 @@ class FrameImageDataset(torch.utils.data.Dataset):
 
         flow = np.concatenate(arrays, axis=0)  # (C_flow * F, H, W)
         flow_t = torch.from_numpy(flow).float()
+        # If the image transform resized the image, rescale flow displacement values
+        # so they remain correct in the transformed image coordinate system.
+        # Use the transformed frame tensor size (C, H, W) to get new H,W.
+        try:
+            new_h, new_w = frame.shape[1], frame.shape[2]
+            f_h, f_w = flow_t.shape[1], flow_t.shape[2]
+            if (f_h, f_w) != (new_h, new_w) and (orig_w is not None and orig_h is not None):
+                # spatially resample flow and then scale dx/dy channels by image scale
+                flow_t = F.interpolate(flow_t.unsqueeze(0), size=(new_h, new_w), mode='bilinear', align_corners=False).squeeze(0)
+                scale_w = float(new_w) / float(orig_w)
+                scale_h = float(new_h) / float(orig_h)
+                if abs(scale_w - scale_h) < 1e-6:
+                    flow_t = flow_t * scale_w
+                else:
+                    C = flow_t.shape[0]
+                    for c in range(0, C, 2):
+                        flow_t[c] = flow_t[c] * scale_w
+                        if (c + 1) < C:
+                            flow_t[c + 1] = flow_t[c + 1] * scale_h
+        except Exception:
+            # if anything goes wrong, fall back to using the flow as-is
+            pass
         if self.flow_transform:
             flow_t = self.flow_transform(flow_t)
 

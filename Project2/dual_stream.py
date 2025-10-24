@@ -22,12 +22,12 @@ class TwoStream(nn.Module):
 
         self.poolS = nn.MaxPool2d(2, 2)  # Halves dimensions each time
 
-        # With pooling after each conv: 128->64->32->16->8->4->2 after 6 pools
+
         # But we'll do 4 pools to get to reasonable size: 128->64->32->16->8
         self.flattenS = nn.Flatten()
-
         # Compact FC head for ~150k total parameters: 8*8*128 -> 64 -> 16 -> 2
-        self.fc1S = nn.Linear(128 * 8 * 8, 64)
+        # TODO: WATCH OUT THIS IS HARDCODED BASED ON THE IMAGE SIZE
+        self.fc1S = nn.Linear(128 * 8**2, 64)
         self.fc2S = nn.Linear(64, 16)
         self.fc3S = nn.Linear(16, num_classes)
 
@@ -82,8 +82,9 @@ class TwoStream(nn.Module):
         self.bn3F = nn.BatchNorm2d(128) if use_batchnorm else nn.Identity()
         self.bn4F = nn.BatchNorm2d(128) if use_batchnorm else nn.Identity()
 
+
         # Fully-connected head mirrors the spatial head
-        self.fc1F = nn.Linear(128 * 8 * 8, 64)
+        self.fc1F = nn.Linear(128 * 8**2, 64)
         self.fc2F = nn.Linear(64, 16)
         self.fc3F = nn.Linear(16, self.fc3S.out_features)
 

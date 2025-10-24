@@ -132,7 +132,8 @@ def main(args):
     model = model.to(device)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=1e-4)
+
+    optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
     best_val_acc = 0.0
@@ -156,8 +157,6 @@ def main(args):
             'val_acc': val_acc,
             'args': vars(args)
         }
-        save_checkpoint(ckpt, str(output_dir / f'checkpoint_epoch_{epoch}.pt'))
-
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             save_checkpoint(ckpt, str(output_dir / 'best_checkpoint.pt'))
@@ -174,14 +173,14 @@ if __name__ == '__main__':
                         help='number of channels in flow input (e.g. 2*9=18)')
     parser.add_argument('--num_classes', type=int, default=10)
     parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--epochs', type=int, default=1)
-    parser.add_argument('--lr', type=float, default=1e-2)
+    parser.add_argument('--epochs', type=int, default=30)
+    parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--dropout', type=float, default=0.0)
     parser.add_argument('--use_bn', action='store_true')
     parser.add_argument('--avg_logits', dest='avg_logits', action='store_true', help='Use averaging of logits (default)')
     parser.add_argument('--no-avg_logits', dest='avg_logits', action='store_false', help='Use SVM head instead of averaging')
     parser.set_defaults(avg_logits=True)
-    parser.add_argument('--img_size', type=int, default=64)
+    parser.add_argument('--img_size', type=int, default=128)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--output_dir', type=str, default='./checkpoints')
     parser.add_argument('--seed', type=int, default=42)

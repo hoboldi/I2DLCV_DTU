@@ -117,16 +117,17 @@ class TwoStream(nn.Module):
         f = self.dropoutF(F.relu(self.fc1F(f)))
         f = self.dropoutF(F.relu(self.fc2F(f)))
         logits_f = self.fc3F(f)
-
         # Fusion options:
         # - if avgLogits True: apply softmax to each stream, then average the class probabilities
         # - if avgLogits False: feed concatenated logits into small SVM head
         probs_s = F.softmax(logits_s, dim=1)
         probs_f = F.softmax(logits_f, dim=1)
         if self.avgLogits:
-            logits = (probs_s + probs_f) / 2.0
-        else:
-            cat = torch.cat([probs_s, probs_f], dim=1)
-            logits = self.svm(cat)
-
-        return logits
+            probs = (probs_s + probs_f) / 2.0
+        return probs
+    
+def custom_loss(probs, labels):
+    log_probs = torch.log(torch.clamp(probs, min=1e-8))  # small epsilon for numerical stability
+    
+    loss = F.nll_loss(log_probs, labels)
+    return loss

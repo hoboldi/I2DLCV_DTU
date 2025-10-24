@@ -4,6 +4,7 @@ import time
 import random
 from pathlib import Path
 
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -11,11 +12,12 @@ from torch.utils.data import DataLoader
 try:
     from Project2.dual_stream import TwoStream
     from Project2.datasets import FrameImageDataset
+    from Project2.dual_stream import custom_loss
 except Exception:
     # allow running when this file is executed from Project2/ directly
     from dual_stream import TwoStream
     from datasets import FrameImageDataset
-
+    from dual_stream import custom_loss
 
 def set_seed(seed: int = 42):
     random.seed(seed)
@@ -23,7 +25,7 @@ def set_seed(seed: int = 42):
     torch.cuda.manual_seed_all(seed)
 
 
-def train_one_epoch(model, device, loader, optimizer, criterion, use_flow):
+def train_one_epoch(model, device, loader, optimizer, use_flow):
     model.train()
     running_loss = 0.0
     correct = 0
@@ -43,7 +45,7 @@ def train_one_epoch(model, device, loader, optimizer, criterion, use_flow):
             labels = labels.to(device)
             logits = model(imgs)
 
-        loss = criterion(logits, labels)
+        loss = custom_loss(logits, labels)
 
         optimizer.zero_grad()
         loss.backward()
@@ -59,7 +61,7 @@ def train_one_epoch(model, device, loader, optimizer, criterion, use_flow):
     return epoch_loss, epoch_acc
 
 
-def evaluate(model, device, loader, criterion, use_flow):
+def evaluate(model, device, loader, use_flow):
     model.eval()
     running_loss = 0.0
     correct = 0
@@ -79,7 +81,7 @@ def evaluate(model, device, loader, criterion, use_flow):
                 labels = labels.to(device)
                 logits = model(imgs)
 
-            loss = criterion(logits, labels)
+            loss = custom_loss(logits, labels)
             running_loss += loss.item() * labels.size(0)
             preds = logits.argmax(dim=1)
             correct += (preds == labels).sum().item()
@@ -131,8 +133,6 @@ def main(args):
 
     model = model.to(device)
 
-    criterion = nn.CrossEntropyLoss()
-
     optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
@@ -142,8 +142,8 @@ def main(args):
 
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
-        train_loss, train_acc = train_one_epoch(model, device, train_loader, optimizer, criterion, args.use_flow)
-        val_loss, val_acc = evaluate(model, device, val_loader, criterion, args.use_flow)
+        train_loss, train_acc = train_one_epoch(model, device, train_loader, optimizer, args.use_flow)
+        val_loss, val_acc = evaluate(model, device, val_loader, args.use_flow)
         scheduler.step()
 
         t1 = time.time()
@@ -168,9 +168,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--root_dir', type=str, default='/dtu/datasets1/02516/ucf101_noleakage')
     parser.add_argument('--flow_root', type=str, default=None)
-    parser.add_argument('--use_flow', action='store_true')
+    # Force flow usage by default and do not expose a CLI flag to disable it.
+    parser.set_defaults(use_flow=True)
     parser.add_argument('--flow_in_channels', type=int, default=None,
                         help='number of channels in flow input (e.g. 2*9=18)')
+    parser.set_defaults(flow_in_channels=18)
     parser.add_argument('--num_classes', type=int, default=10)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--epochs', type=int, default=30)

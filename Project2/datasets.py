@@ -4,17 +4,52 @@ import pandas as pd
 from PIL import Image
 import torch
 from torchvision import transforms as T
+import numpy as np
 
 class FrameImageDataset(torch.utils.data.Dataset):
     def __init__(self, 
     root_dir='/dtu/datasets1/02516/ucf101_noleakage',
     split='train', 
-    transform=None):
+    transform=None,
+    flow_transform =None,
+    use_flow=False,
+    flow_root=None,
+    n_sampled_frames=10,
+    ):
+        self.root_dir = root_dir
         self.frame_paths = sorted(glob(f'{root_dir}/frames/{split}/*/*/*.jpg'))
         self.df = pd.read_csv(f'{root_dir}/metadata/{split}.csv')
         self.split = split
         self.transform = transform
+        # flow options
+        self.use_flow = use_flow
+        self.flow_root = flow_root
+        self.n_sampled_frames = n_sampled_frames
+        self.flow_transform = flow_transform
        
+        # precompute mapping video_name -> sorted list of flow .npy files
+        self.video_to_flow_files = {}
+        expected = max(0, self.n_sampled_frames - 1)
+        for frame_path in self.frame_paths:
+            video_dir = os.path.dirname(frame_path)
+            video_name = os.path.basename(video_dir)
+            if video_name in self.video_to_flow_files:
+                continue
+
+            # compute flows_dir by mirroring frames/<split> -> flows/<split>
+            if self.flow_root:
+                rel = os.path.relpath(video_dir, os.path.join(self.root_dir, 'frames', split))
+                flows_dir = os.path.join(self.flow_root, split, rel)
+            else:
+                flows_dir = video_dir.replace(os.path.join('frames', split), os.path.join('flows', split))
+
+            flow_files = sorted(glob(os.path.join(flows_dir, '*.npy')))
+            if len(flow_files) != expected:
+                raise FileNotFoundError(f'Video {video_name}: expected {expected} flow files in {flows_dir}, found {len(flow_files)}')
+
+            # optional: could validate shapes/dtypes here if desired
+            self.video_to_flow_files[video_name] = flow_files
+
     def __len__(self):
         return len(self.frame_paths)
 
@@ -34,7 +69,45 @@ class FrameImageDataset(torch.utils.data.Dataset):
         else:
             frame = T.ToTensor()(frame)
 
-        return frame, label
+        if not self.use_flow:
+            return frame, label
+
+        # load associated flows
+        video_dir = os.path.dirname(frame_path)
+        # map frames/.../class/video -> flows/.../class/video
+        flows_dir = video_dir.replace(os.path.join('frames', self.split), os.path.join('flows', self.split))
+
+        # look up precomputed list of flow files for this video
+        flow_files = self.video_to_flow_files.get(video_name)
+        if flow_files is None:
+            raise FileNotFoundError(f'No precomputed flow files for video {video_name} (looked in {flows_dir})')
+
+        arrays = []
+        for f in flow_files:
+            a = np.load(f)
+            if np.issubdtype(a.dtype, np.integer):
+                a = a.astype(np.float32) / 255.0
+            else:
+                a = a.astype(np.float32)
+
+            # ensure channels-first
+            if a.ndim == 2:
+                a = a[np.newaxis, :, :]
+            elif a.ndim == 3:
+                # if channels last (H,W,C) -> transpose
+                if a.shape[2] in (1,2,3,4) and a.shape[0] > a.shape[2]:
+                    a = np.transpose(a, (2,0,1))
+                elif a.shape[0] not in (1,2,3,4) and a.shape[2] in (1,2,3,4):
+                    a = np.transpose(a, (2,0,1))
+
+            arrays.append(a)
+
+        flow = np.concatenate(arrays, axis=0)  # (C_flow * F, H, W)
+        flow_t = torch.from_numpy(flow).float()
+        if self.flow_transform:
+            flow_t = self.flow_transform(flow_t)
+
+        return frame, flow_t, label
 
 
 class FrameVideoDataset(torch.utils.data.Dataset):
@@ -92,112 +165,6 @@ class FrameVideoDataset(torch.utils.data.Dataset):
         return frames
 
 
-class FlowImageDataset(torch.utils.data.Dataset):
-    """Dataset treating each optical-flow image as a sample.
-
-    Expects flow images under: {root_dir}/flows/{split}/... (any depth)
-    Supports .png and .jpg extensions. Metadata lookup uses the same
-    metadata/{split}.csv and expects a `video_name` column to map labels.
-    """
-    def __init__(self, root_dir='/work3/ppar/data/ucf101', split='train', transform=None):
-        # find common flow image extensions recursively
-        pngs = glob(f'{root_dir}/flows/{split}/**/*.png', recursive=True)
-        jpgs = glob(f'{root_dir}/flows/{split}/**/*.jpg', recursive=True)
-        self.flow_paths = sorted(pngs + jpgs)
-        self.df = pd.read_csv(f'{root_dir}/metadata/{split}.csv')
-        self.split = split
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.flow_paths)
-
-    def _get_meta(self, attr, value):
-        return self.df.loc[self.df[attr] == value]
-
-    def __getitem__(self, idx):
-        flow_path = self.flow_paths[idx]
-        # assume video_name is the parent folder of the flow image
-        video_name = os.path.basename(os.path.dirname(flow_path))
-        video_meta = self._get_meta('video_name', video_name)
-        label = video_meta['label'].item()
-
-        img = Image.open(flow_path).convert('RGB')
-        if self.transform:
-            img = self.transform(img)
-        else:
-            img = T.ToTensor()(img)
-
-        return img, label
-
-
-class FlowVideoDataset(torch.utils.data.Dataset):
-    """Dataset treating each video as a sequence of flow images.
-
-    It looks for flow frames under videos' equivalent frames directory by
-    replacing 'videos' with 'flows' in the path (same convention as existing
-    FrameVideoDataset). It will try to collect up to n_sampled_frames images;
-    if fewer exist, the last available frame will be repeated to reach the
-    requested count.
-    """
-    def __init__(self, root_dir='/work3/ppar/data/ucf101', split='train', transform=None, stack_frames=True, n_sampled_frames=10):
-        self.video_paths = sorted(glob(f'{root_dir}/videos/{split}/*/*.avi'))
-        self.df = pd.read_csv(f'{root_dir}/metadata/{split}.csv')
-        self.split = split
-        self.transform = transform
-        self.stack_frames = stack_frames
-        self.n_sampled_frames = n_sampled_frames
-
-    def __len__(self):
-        return len(self.video_paths)
-
-    def _get_meta(self, attr, value):
-        return self.df.loc[self.df[attr] == value]
-
-    def __getitem__(self, idx):
-        video_path = self.video_paths[idx]
-        video_name = os.path.splitext(os.path.basename(video_path))[0]
-        video_meta = self._get_meta('video_name', video_name)
-        label = video_meta['label'].item()
-
-        # build corresponding flows directory path
-        video_frames_dir = self.video_paths[idx].split('.avi')[0].replace('videos', 'flows')
-        flow_images = self.load_flows(video_frames_dir)
-
-        if self.transform:
-            frames = [self.transform(img) for img in flow_images]
-        else:
-            frames = [T.ToTensor()(img) for img in flow_images]
-
-        if self.stack_frames:
-            frames = torch.stack(frames).permute(1, 0, 2, 3)
-
-        return frames, label
-
-    def load_flows(self, flows_dir):
-        # collect png/jpg, sort and take/sample up to n_sampled_frames
-        pngs = sorted(glob(os.path.join(flows_dir, '*.png')))
-        jpgs = sorted(glob(os.path.join(flows_dir, '*.jpg')))
-        files = sorted(pngs + jpgs)
-
-        if len(files) == 0:
-            raise FileNotFoundError(f'No flow images found in {flows_dir}')
-
-        # pick first n_sampled_frames (or sample uniformly if more available)
-        if len(files) >= self.n_sampled_frames:
-            chosen = files[:self.n_sampled_frames]
-        else:
-            # repeat the last frame to pad
-            chosen = list(files)
-            last = files[-1]
-            while len(chosen) < self.n_sampled_frames:
-                chosen.append(last)
-
-        flows = []
-        for f in chosen:
-            img = Image.open(f).convert('RGB')
-            flows.append(img)
-
-        return flows
 
 if __name__ == '__main__':
     from torch.utils.data import DataLoader

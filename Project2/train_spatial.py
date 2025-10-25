@@ -188,7 +188,7 @@ def train(args):
                     'train_acc': epoch_acc,
                     'val_loss': val_loss,
                     'val_acc': val_acc
-                }, str(run_dir), 'best.pth')
+                }, str(run_dir), 'best_spatial.pth')
         else:
             # fallback: if no validation, keep best by training accuracy
             if epoch_acc > best_acc:
@@ -200,7 +200,7 @@ def train(args):
                     'scheduler_state': scheduler.state_dict() if scheduler is not None else None,
                     'train_loss': epoch_loss,
                     'train_acc': epoch_acc
-                }, str(run_dir), 'best.pth')
+                }, str(run_dir), 'best_spatial.pth')
 
     print(f"Training completed. checkpoints saved to {run_dir}")
 

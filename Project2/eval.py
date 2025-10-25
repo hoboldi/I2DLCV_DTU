@@ -141,74 +141,6 @@ def evaluate_temporal_on_videos(ckpt_path: str,
     return all_probs, all_labels, ck
 
 
-def evaluate_spatial_on_videos(ckpt_path: str,
-                               root_dir: str,
-                               eval_split: str = 'val',
-                               batch_size: int = 8,
-                               workers: int = 4,
-                               img_size: int = 64,
-                               n_sampled_frames: int = 10,
-                               in_channels: int = 3,
-                               device: torch.device = None):
-    """Load spatial model and run it on FrameVideoDataset by running the model on each frame,
-    softmaxing per-frame logits and averaging probabilities across frames per video.
-
-    Returns: (probs (N, num_classes), labels (N,), ck)
-    """
-    if device is None:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    # load model
-    model, ck = load_model_from_checkpoint(ckpt_path, Network, device=device,
-                                           override_model_kwargs={'in_channels': in_channels})
-
-    # transforms for frames
-    transform = T.Compose([T.Resize((img_size, img_size)), T.ToTensor()])
-
-    # import FrameVideoDataset
-    try:
-        from Project2.datasets import FrameVideoDataset
-    except Exception:
-        from datasets import FrameVideoDataset
-
-    # request stacked frames so we get a tensor per sample: (C, F, H, W)
-    dataset = FrameVideoDataset(root_dir=root_dir, split=eval_split, transform=transform, stack_frames=True, n_sampled_frames=n_sampled_frames)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True)
-
-    softmax = torch.nn.Softmax(dim=1)
-
-    all_probs = []
-    all_labels = []
-
-    model.eval()
-    with torch.no_grad():
-        for batch_idx, (frames, flows, labels) in enumerate(loader):
-            # frames shape: [batch, C, F, H, W]
-            # we want to run model on each frame and average probabilities across F
-            frames = frames.to(device)
-            labels = labels.to(device)
-
-            # reshape to (batch * F, C, H, W)
-            b, c, f, h, w = frames.shape
-            frames_reshaped = frames.permute(0, 2, 1, 3, 4).reshape(b * f, c, h, w)
-
-            logits = model(frames_reshaped)  # (b*f, num_classes)
-            probs = softmax(logits)
-
-            probs = probs.view(b, f, -1)  # (b, f, num_classes)
-            probs_mean = probs.mean(dim=1)  # (b, num_classes)
-
-            all_probs.append(probs_mean.cpu().numpy())
-            all_labels.append(labels.cpu().numpy())
-
-            if (batch_idx + 1) % 10 == 0:
-                print(f"Processed {batch_idx+1}/{len(loader)} batches")
-
-    all_probs = np.concatenate(all_probs, axis=0)
-    all_labels = np.concatenate(all_labels, axis=0)
-
-    return all_probs, all_labels, ck
-
 
 def evaluate_both_on_videos(temporal_ckpt: str,
                             spatial_ckpt: str,
@@ -262,11 +194,23 @@ def evaluate_both_on_videos(temporal_ckpt: str,
             labels = labels.to(device)
 
             b, c, f, h, w = frames.shape
-            frames_reshaped = frames.permute(0, 2, 1, 3, 4).reshape(b * f, c, h, w)
 
-            # spatial per-frame
-            s_logits = s_model(frames_reshaped)
-            s_probs = softmax(s_logits).view(b, f, -1).mean(dim=1)  # (b, num_classes)
+            # spatial per-frame: run the spatial model on each frame separately,
+            # softmax each frame's logits, then average probabilities across frames
+            # to obtain a per-video spatial prediction.
+            s_probs_accum = None
+            for fi in range(f):
+                # extract frame fi -> shape (b, c, h, w)
+                frame_i = frames[:, :, fi, :, :]
+                logits_i = s_model(frame_i)  # (b, num_classes)
+                probs_i = softmax(logits_i)  # (b, num_classes)
+                if s_probs_accum is None:
+                    s_probs_accum = probs_i
+                else:
+                    s_probs_accum = s_probs_accum + probs_i
+
+            # average over frames
+            s_probs = (s_probs_accum / float(f))
 
             # temporal
             t_logits = t_model(flows)
@@ -312,93 +256,6 @@ def evaluate_both_on_videos(temporal_ckpt: str,
         per_class_stats[int(cls)] = (float(sp_acc), float(tp_acc), float(fu_acc))
 
     return (t_all, s_all, fused_all, labels_all, per_class_stats), (t_ck, s_ck)
-
-
-def parse_args_and_run():
-    import argparse
-    parser = argparse.ArgumentParser(description='Evaluate spatial and/or temporal model on video validation set')
-    parser.add_argument('--mode', choices=['temporal', 'spatial', 'both'], default='temporal',
-                        help='which stream(s) to evaluate')
-    parser.add_argument('--ckpt', type=str, required=False, help='(legacy) path to temporal best checkpoint')
-    parser.add_argument('--temporal-ckpt', type=str, required=False, help='path to temporal best checkpoint')
-    parser.add_argument('--spatial-ckpt', type=str, required=False, help='path to spatial best checkpoint')
-    parser.add_argument('--root-dir', type=str, default='/dtu/datasets1/02516/ucf101_noleakage')
-    parser.add_argument('--eval-split', type=str, default='val')
-    parser.add_argument('--batch-size', type=int, default=8)
-    parser.add_argument('--workers', type=int, default=4)
-    parser.add_argument('--img-size', type=int, default=64)
-    parser.add_argument('--n-sampled-frames', type=int, default=10)
-    parser.add_argument('--in-channels', type=int, default=18, help='input channels for temporal (flow)')
-    parser.add_argument('--spatial-in-channels', type=int, default=3, help='input channels for spatial (image)')
-    parser.add_argument('--out-npz', type=str, default=None, help='output .npz path for temporal (or spatial if mode=spatial). If not set, defaults are used')
-    args = parser.parse_args()
-    # reconcile ckpt args (legacy)
-    temporal_ckpt = args.temporal_ckpt or args.ckpt
-
-    if args.mode == 'temporal':
-        if not temporal_ckpt:
-            raise SystemExit('Temporal checkpoint path is required (use --temporal-ckpt)')
-        out_npz = args.out_npz or 'temporal_probs.npz'
-        probs, labels, ck = evaluate_temporal_on_videos(
-            ckpt_path=temporal_ckpt,
-            root_dir=args.root_dir,
-            eval_split=args.eval_split,
-            batch_size=args.batch_size,
-            workers=args.workers,
-            img_size=args.img_size,
-            n_sampled_frames=args.n_sampled_frames,
-            in_channels=args.in_channels
-        )
-        np.savez(out_npz, probs=probs, labels=labels)
-        print(f"Saved temporal probabilities to {out_npz}")
-
-    elif args.mode == 'spatial':
-        if not args.spatial_ckpt:
-            raise SystemExit('Spatial checkpoint path is required (use --spatial-ckpt)')
-        out_npz = args.out_npz or 'spatial_probs.npz'
-        probs, labels, ck = evaluate_spatial_on_videos(
-            ckpt_path=args.spatial_ckpt,
-            root_dir=args.root_dir,
-            eval_split=args.eval_split,
-            batch_size=args.batch_size,
-            workers=args.workers,
-            img_size=args.img_size,
-            n_sampled_frames=args.n_sampled_frames,
-            in_channels=args.spatial_in_channels
-        )
-        np.savez(out_npz, probs=probs, labels=labels)
-        print(f"Saved spatial probabilities to {out_npz}")
-
-    else:  # both
-        if not temporal_ckpt or not args.spatial_ckpt:
-            raise SystemExit('Both --temporal-ckpt and --spatial-ckpt must be provided for mode=both')
-
-        # run unified evaluation that processes both streams per-sample and fuses
-        fused_out = args.out_npz or 'fused_probs.npz'
-        (t_probs, s_probs, fused_probs, labels, per_class_stats), ck_tuple = evaluate_both_on_videos(
-            temporal_ckpt=temporal_ckpt,
-            spatial_ckpt=args.spatial_ckpt,
-            root_dir=args.root_dir,
-            eval_split=args.eval_split,
-            batch_size=args.batch_size,
-            workers=args.workers,
-            img_size=args.img_size,
-            n_sampled_frames=args.n_sampled_frames,
-            temporal_in_channels=args.in_channels,
-            spatial_in_channels=args.spatial_in_channels
-        )
-
-        # save individual and fused probs
-        np.savez('temporal_probs.npz', probs=t_probs, labels=labels)
-        np.savez('spatial_probs.npz', probs=s_probs, labels=labels)
-        np.savez(fused_out, probs=fused_probs, labels=labels)
-        print(f"Saved temporal, spatial and fused probabilities to temporal_probs.npz, spatial_probs.npz and {fused_out}")
-
-        # print overall and per-class accuracies
-        print("Per-class accuracies (format: class_id -> (spatial_acc, temporal_acc, fused_acc))")
-        for cls, stats in per_class_stats.items():
-            sp_acc, t_acc, fu_acc = stats
-            print(f"{cls} -> spatial: {sp_acc:.2f}%, temporal: {t_acc:.2f}%, fused: {fu_acc:.2f}%")
 
 
 if __name__ == '__main__':

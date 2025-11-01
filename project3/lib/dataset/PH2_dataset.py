@@ -2,6 +2,7 @@ import torch
 import os
 import glob
 import PIL.Image as Image
+import torchvision.transforms.functional as TF
 
 class PH2_dataset(torch.utils.data.Dataset):
     def __init__(self, root_dir, transform=None):
@@ -49,7 +50,6 @@ class PH2_dataset(torch.utils.data.Dataset):
             Y = self.transform(mask)
         else:
             # Convert to PyTorch tensors (default float, scale 0-1)
-            import torchvision.transforms.functional as TF
             X = TF.to_tensor(image)
             Y = TF.to_tensor(mask)
 

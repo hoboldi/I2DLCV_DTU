@@ -99,11 +99,9 @@ def train(args):
     model = Network(num_classes=args.num_classes, dropout_rate=args.dropout, img_size=args.img_size, in_channels=args.in_channels)
     model = model.to(device)
 
-    # loss and optimizer
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-    # === CHANGED: ReduceLROnPlateau instead of StepLR ===
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode='min',

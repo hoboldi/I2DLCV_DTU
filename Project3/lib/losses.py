@@ -30,12 +30,16 @@ class FocalLoss(nn.Module):
         self.ignore_index = ignore_index
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        # squeeze channel dim if it's 1
-        if logits.dim() == 4 and logits.size(1) == 1:
-            logits = logits.squeeze(1)
-        if targets.dim() == 4 and targets.size(1) == 1:
-            targets = targets.squeeze(1)
+        # targets: (N,H,W) in {0,1}
+        # Support both (N,1,H,W) or (N,2,H,W) logits
+        if logits.dim() == 4 and logits.size(1) == 2:
+            # convert to a single binary logit (class1 vs class0)
+            logits = logits[:, 1] - logits[:, 0]        # -> (N,H,W)
+        elif logits.dim() == 4 and logits.size(1) == 1:
+            logits = logits.squeeze(1)                   # -> (N,H,W)
 
+        if targets.dim() == 4 and targets.size(1) == 1:
+            targets = targets.squeeze(1)                 # -> (N,H,W)
         targets = targets.float()
 
         # optional ignore mask
@@ -46,7 +50,7 @@ class FocalLoss(nn.Module):
             valid = None
             t = targets
 
-        # per-pixel BCE with logits
+        # BCE with logits (per-pixel)
         bce = F.binary_cross_entropy_with_logits(logits, t, reduction="none")
         log_pt = -bce
         pt = torch.exp(log_pt).clamp(min=1e-8, max=1.0)
@@ -61,13 +65,11 @@ class FocalLoss(nn.Module):
             return loss
         if self.reduction == "sum":
             return loss.sum()
-
-        # reduction == "mean"
+        # mean
         if valid is not None:
-            denom = valid.sum()  # tensor
-            return loss.sum() / denom.clamp(min=1)
-        else:
-            return loss.mean()
+            denom = valid.sum().clamp(min=1)
+            return loss.sum() / denom
+        return loss.mean()
 
 class BCELoss_TotalVariation(nn.Module):
     def __init__(self):

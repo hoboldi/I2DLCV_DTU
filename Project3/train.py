@@ -13,9 +13,9 @@ from torchvision.transforms import InterpolationMode as IM
 # Quick config
 # -----------------------
 model_mode   = "unet"
-dataset_mode = "drive"
+dataset_mode = "click"
 loss_mode    = "focal"            # uses your lib.losses.FocalLoss
-data_root    = Path("/dtu/datasets1/02516/DRIVE")
+data_root    = Path("/dtu/datasets1/02516/PH2_Dataset_images")
 device       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 img_tfm = T.Compose([
@@ -88,15 +88,53 @@ def import_class(primary: str, fallback: str, attr: str):
 # -----------------------
 # Factories (use your existing files)
 # -----------------------
-MODEL_MAP = {"unet": ("UNetModel",), "dilated":("DilatedNetModel",), "encdec":("EncDecModel",)}
-DatasetMap = {"drive": ("DRIVE_dataset", str(data_root)), "ph2": ("PH2_dataset", "data/PH2")}
+MODEL_MAP = {
+    "unet": ("UNetModel",),
+    "dilated": ("DilatedNetModel",),
+    "encdec": ("EncDecModel",),
+}
 
+DatasetMap = {
+    "drive": ("DRIVE_dataset", str(data_root)),
+    "ph2": ("PH2_dataset", "data/PH2"),
+    "click": ("ClickDataset", "data/clicks")  # new dataset
+}
+
+# Select model + dataset
 ModelClass = import_class("Project3.lib.model", "lib.model", MODEL_MAP[model_mode][0])
 model = ModelClass().to(device)
 
 DatasetClassName, dataset_root_dir = DatasetMap[dataset_mode]
 DatasetClass = import_class("Project3.lib.dataset", "lib.dataset", DatasetClassName)
 
+# Define transforms
+if dataset_mode == "click":
+    # Assuming ClickDataset returns images + click masks
+    img_tfm = T.Compose([
+        T.Resize((512, 512), interpolation=IM.BILINEAR, antialias=True),
+        T.ToTensor(),
+        # Optional: normalize clicks if stored as grayscale heatmaps
+        # T.Normalize(mean=[0.5], std=[0.5]),
+    ])
+
+    def mask_tfm(msk):
+        # Click maps are discrete, so keep nearest-neighbor
+        m = T.Resize((512, 512), interpolation=IM.NEAREST)(msk)
+        m = T.ToTensor()(m)
+        return (m >= 0.5).to(torch.long).squeeze(0)
+
+else:
+    # Fallback for DRIVE / PH2
+    img_tfm = T.Compose([
+        T.Resize((512, 512), interpolation=IM.BILINEAR, antialias=True),
+        T.ToTensor(),
+    ])
+    def mask_tfm(msk):
+        m = T.Resize((512, 512), interpolation=IM.NEAREST)(msk)
+        m = T.ToTensor()(m)
+        return (m >= 0.5).to(torch.long).squeeze(0)
+
+# Initialize dataset loaders
 train_ds = DatasetClass(root_dir=dataset_root_dir, split="train",
                         image_transform=img_tfm, mask_transform=mask_tfm)
 val_ds   = DatasetClass(root_dir=dataset_root_dir, split="val",
@@ -104,6 +142,7 @@ val_ds   = DatasetClass(root_dir=dataset_root_dir, split="val",
 
 train_loader = DataLoader(train_ds, batch_size=8, shuffle=True,  num_workers=4, pin_memory=True)
 val_loader   = DataLoader(val_ds,   batch_size=8, shuffle=False, num_workers=4, pin_memory=True)
+
 
 # -----------------------
 # Label stats -> α for FocalLoss (and optional bias init)

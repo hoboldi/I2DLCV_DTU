@@ -8,6 +8,7 @@ from sklearn.model_selection import train_test_split
 
 DATA_PATH = '/dtu/datasets1/02516/PH2_Dataset_images'
 
+
 def sample_points(mask_bool, total_points, random_state=None, min_pos=1, min_neg=1):
     """Uniformly sample positive/negative points based on lesion fraction."""
     if isinstance(random_state, (int, type(None))):
@@ -55,25 +56,32 @@ def sample_points(mask_bool, total_points, random_state=None, min_pos=1, min_neg
     return pos_pts, neg_pts, meta
 
 
-def points_to_onehot_posneg(pos_pts, neg_pts, shape):
-    """Create one-hot map for pos (C=0) and neg (C=1) points."""
+def points_to_mask_with_ignore(pos_pts, neg_pts, shape, ignore_index=-1):
+    """
+    Create a single-channel mask where:
+        - positive clicks = 1
+        - negative clicks = 0
+        - everything else = ignore_index (e.g., -1)
+    """
     H, W = shape
-    label = torch.zeros((2, H, W), dtype=torch.float32)
+    label = torch.full((H, W), ignore_index, dtype=torch.float32)
     if pos_pts.shape[0] > 0:
-        label[0, pos_pts[:, 1], pos_pts[:, 0]] = 1.0
+        label[pos_pts[:, 1], pos_pts[:, 0]] = 1.0
     if neg_pts.shape[0] > 0:
-        label[1, neg_pts[:, 1], neg_pts[:, 0]] = 1.0
+        label[neg_pts[:, 1], neg_pts[:, 0]] = 0.0
     return label
 
 
 # ---------- Dataset ----------
 class PH2Dataset(Dataset):
-    def __init__(self, image_paths, mask_paths, transform=None, total_points=5000, random_seed=42):
+    def __init__(self, image_paths, mask_paths, transform=None,
+                 total_points=5000, random_seed=42, ignore_index=-1):
         self.image_paths = image_paths
         self.mask_paths = mask_paths
         self.transform = transform
         self.total_points = total_points
         self.rng = np.random.RandomState(random_seed)
+        self.ignore_index = ignore_index
 
     def __len__(self):
         return len(self.image_paths)
@@ -86,11 +94,14 @@ class PH2Dataset(Dataset):
             image = self.transform(image)
             mask = self.transform(mask)
 
+        # Convert mask to boolean
         mask_bool = mask.squeeze().numpy() > 0.5
 
+        # Sample positive and negative points
         pos_pts, neg_pts, meta = sample_points(mask_bool, self.total_points, random_state=self.rng)
 
-        weak_mask = points_to_onehot_posneg(pos_pts, neg_pts, mask_bool.shape)
+        # Convert sampled points into a mask with ignore index
+        weak_mask = points_to_mask_with_ignore(pos_pts, neg_pts, mask_bool.shape, self.ignore_index)
 
         return image, weak_mask
 
@@ -120,4 +131,3 @@ def get_PH2_datasets(transform=None, test_size=0.2, val_size=0.1, seed=42):
     test_dataset = PH2Dataset(test_imgs, test_masks, transform=transform)
 
     return train_dataset, val_dataset, test_dataset
-

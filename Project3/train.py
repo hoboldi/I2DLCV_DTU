@@ -96,8 +96,8 @@ MODEL_MAP = {
 
 DatasetMap = {
     "drive": ("DRIVE_dataset", str(data_root)),
-    "ph2": ("PH2_dataset", "data/PH2"),
-    "click": ("ClickDataset", "data/clicks")  # new dataset
+    "ph2": ("PH2_dataset", str(data_root)),
+    "click": ("ClickpointsDataset", str(data_root)),  # uses PH2 images, generates clicks
 }
 
 # Select model + dataset
@@ -177,7 +177,7 @@ measures = import_module("measure", "Project3.lib.measure", "lib.measure")
 def make_criterion(mode: str) -> nn.Module:
     m = mode.lower()
     if m == "focal":
-        return losses.FocalLoss(alpha=alpha, gamma=2.0, reduction="mean")
+        return losses.FocalLoss(alpha=alpha, gamma=2.0, reduction="mean", ignore_index=-1)
     if m in {"ce", "crossentropy"}:
         # Weights to counter class imbalance (for 2-class heads only)
         w = torch.tensor([1.0, max(1.0, neg/max(pos,1))], device=device, dtype=torch.float32)

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Optional
 
 class BCELoss(nn.Module):
     def __init__(self):
@@ -21,7 +22,7 @@ class DiceLoss(nn.Module):
 
 class FocalLoss(nn.Module):
     def __init__(self, alpha: float = 0.25, gamma: float = 2.0,
-                 reduction: str = "mean", ignore_index: int | None = None):
+                 reduction: str = "mean", ignore_index: Optional[int] = None):
         super().__init__()
         assert reduction in ("none", "mean", "sum")
         self.alpha = alpha

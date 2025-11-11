@@ -6,7 +6,7 @@ import torch
 from torch.utils.data import Dataset
 from sklearn.model_selection import train_test_split
 
-class ClickpointsDataset(Dataset):
+class Clickpoints_dataset(Dataset):
     """
     PH2-based weakly supervised dataset using clickpoints.
     Provides the same interface as DRIVE_dataset with train/val/test split.

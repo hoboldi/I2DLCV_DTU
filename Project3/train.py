@@ -13,9 +13,9 @@ from torchvision.transforms import InterpolationMode as IM
 # Quick config
 # -----------------------
 model_mode   = "unet"
-dataset_mode = "click"
+dataset_mode = "drive"
 loss_mode    = "focal"            # uses your lib.losses.FocalLoss
-data_root    = Path("/dtu/datasets1/02516/PH2_Dataset_images")
+data_root    = Path("/dtu/datasets1/02516/PH2_Dataset_Images") # DRIVE or PH2_Dataset_Images
 device       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 img_tfm = T.Compose([
@@ -97,7 +97,7 @@ MODEL_MAP = {
 DatasetMap = {
     "drive": ("DRIVE_dataset", str(data_root)),
     "ph2": ("PH2_dataset", str(data_root)),
-    "click": ("ClickpointsDataset", str(data_root)),  # uses PH2 images, generates clicks
+    "click": ("Clickpoints_dataset", str(data_root)),  # uses PH2 images, generates clicks
 }
 
 # Select model + dataset
@@ -140,6 +140,9 @@ train_ds = DatasetClass(root_dir=dataset_root_dir, split="train",
 val_ds   = DatasetClass(root_dir=dataset_root_dir, split="val",
                         image_transform=img_tfm, mask_transform=mask_tfm)
 
+print(f"Train dataset length: {len(train_ds)}")
+print(f"Validation dataset length: {len(val_ds)}")
+
 train_loader = DataLoader(train_ds, batch_size=8, shuffle=True,  num_workers=4, pin_memory=True)
 val_loader   = DataLoader(val_ds,   batch_size=8, shuffle=False, num_workers=4, pin_memory=True)
 
@@ -177,7 +180,7 @@ measures = import_module("measure", "Project3.lib.measure", "lib.measure")
 def make_criterion(mode: str) -> nn.Module:
     m = mode.lower()
     if m == "focal":
-        return losses.FocalLoss(alpha=alpha, gamma=2.0, reduction="mean", ignore_index=-1)
+        return losses.FocalLoss(alpha=alpha, gamma=2.0, reduction="mean")
     if m in {"ce", "crossentropy"}:
         # Weights to counter class imbalance (for 2-class heads only)
         w = torch.tensor([1.0, max(1.0, neg/max(pos,1))], device=device, dtype=torch.float32)

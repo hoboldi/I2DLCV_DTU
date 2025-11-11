@@ -15,7 +15,7 @@ from torchvision.transforms import InterpolationMode as IM
 model_mode   = "unet"
 dataset_mode = "drive"
 loss_mode    = "focal"            # uses your lib.losses.FocalLoss
-data_root    = Path("/dtu/datasets1/02516/PH2_Dataset_Images") # DRIVE or PH2_Dataset_Images
+data_root    = Path("/dtu/datasets1/02516/PH2_Dataset_images") # DRIVE or PH2_Dataset_images
 device       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 img_tfm = T.Compose([

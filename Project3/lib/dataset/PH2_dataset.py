@@ -1,56 +1,98 @@
 import torch
-import os
-import glob
-import PIL.Image as Image
+from torch.utils.data import Dataset
+import os, glob
+from PIL import Image
 import torchvision.transforms.functional as TF
 
-class PH2_dataset(torch.utils.data.Dataset):
-    def __init__(self, root_dir, transform=None):
+
+class PH2_dataset(Dataset):
+    def __init__(
+        self,
+        root_dir: str,
+        split: str = "train",
+        image_transform=None,
+        mask_transform=None,
+        val_ratio: float = 0.2,
+        test_ratio: float = 0.1,
+        seed: int = 1337,
+    ):
         """
-        root_dir: path to the folder containing all IMDxxx case folders
-        transform: torchvision transforms to apply to both image and mask
+        PH2 dataset loader with the same interface as DRIVE_dataset.
+
+        Args:
+            root_dir: path to PH2_Dataset_images (contains IMD### folders)
+            split: 'train', 'val', or 'test'
+            image_transform, mask_transform: optional torchvision transforms
+            val_ratio: fraction of data for validation
+            test_ratio: fraction of data for testing
+            seed: random seed for deterministic splits
         """
+        super().__init__()
+        assert split in {"train", "val", "test"}, f"Invalid split: {split}"
+
         self.root_dir = root_dir
-        self.transform = transform
+        self.split = split
+        self.image_transform = image_transform
+        self.mask_transform = mask_transform
 
-        # Get a sorted list of all case folders, e.g. IMD001, IMD002, ..., IMD437
-        self.case_dirs = sorted(glob.glob(os.path.join(root_dir, 'IMD*')))
+        # find all IMDxxx case directories
+        case_dirs = sorted(glob.glob(os.path.join(root_dir, "IMD*")))
 
-        # Build lists of image and mask file paths
-        self.image_paths = []
-        self.mask_paths = []
-
-        for case_dir in self.case_dirs:
-            image_file = glob.glob(os.path.join(case_dir, '*_Dermoscopic_Image', '*.bmp'))
-            mask_file = glob.glob(os.path.join(case_dir, '*_lesion', '*.bmp'))
+        image_paths, mask_paths = [], []
+        for case_dir in case_dirs:
+            image_file = glob.glob(os.path.join(case_dir, "*_Dermoscopic_Image", "*.bmp"))
+            mask_file = glob.glob(os.path.join(case_dir, "*_lesion", "*.bmp"))
 
             if len(image_file) == 1 and len(mask_file) == 1:
-                self.image_paths.append(image_file[0])
-                self.mask_paths.append(mask_file[0])
+                image_paths.append(image_file[0])
+                mask_paths.append(mask_file[0])
             else:
-                # Warn if files are missing or multiple files exist
-                print(f"Warning: case {case_dir} has {len(image_file)} image(s) and {len(mask_file)} mask(s)")
+                print(f"[Warning] {case_dir} — found {len(image_file)} images, {len(mask_file)} masks")
+
+        assert len(image_paths) == len(mask_paths), "Mismatch between images and masks"
+
+        # deterministic split
+        g = torch.Generator()
+        g.manual_seed(seed)
+        idx = torch.randperm(len(image_paths), generator=g).tolist()
+
+        n_total = len(idx)
+        n_test = int(round(n_total * test_ratio))
+        n_val = int(round(n_total * val_ratio))
+        if n_test + n_val > n_total:
+            overflow = n_test + n_val - n_total
+            n_test -= min(overflow, n_test)
+            overflow -= min(overflow, n_test)
+            n_val -= overflow
+
+        test_idx = idx[:n_test]
+        val_idx = idx[n_test:n_test + n_val]
+        train_idx = idx[n_test + n_val:]
+
+        split_map = {"train": train_idx, "val": val_idx, "test": test_idx}
+        chosen_idx = split_map[split]
+
+        self.image_paths = [image_paths[i] for i in chosen_idx]
+        self.mask_paths = [mask_paths[i] for i in chosen_idx]
+
+        print(f"[PH2_dataset] {split}: {len(self.image_paths)} samples "
+              f"(train={len(train_idx)}, val={len(val_idx)}, test={len(test_idx)})")
 
     def __len__(self):
-        """Returns the total number of cases in the dataset"""
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        """Load one sample: image and mask, apply transforms, return tensors"""
-        image_path = self.image_paths[idx]
-        mask_path = self.mask_paths[idx]
+        image = Image.open(self.image_paths[idx]).convert("RGB")
+        mask = Image.open(self.mask_paths[idx]).convert("L")
 
-        # Open images
-        image = Image.open(image_path).convert("RGB")  # ensure 3 channels
-        mask = Image.open(mask_path).convert("L")      # grayscale (binary mask)
-
-        # Apply transforms if provided
-        if self.transform:
-            X = self.transform(image)
-            Y = self.transform(mask)
+        if self.image_transform:
+            X = self.image_transform(image)
         else:
-            # Convert to PyTorch tensors (default float, scale 0-1)
             X = TF.to_tensor(image)
+
+        if self.mask_transform:
+            Y = self.mask_transform(mask)
+        else:
             Y = TF.to_tensor(mask)
 
         return X, Y

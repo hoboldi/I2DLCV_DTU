@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 from sklearn.model_selection import train_test_split
+import torchvision.transforms.functional as TF
 
 class Clickpoints_dataset(Dataset):
     """
@@ -71,33 +72,45 @@ class Clickpoints_dataset(Dataset):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        # Load image and mask
-        img = Image.open(self.image_paths[idx]).convert("RGB")
-        full_mask = Image.open(self.mask_paths[idx]).convert("L")  # full mask
-
+        # Load image and mask (PIL)
+        img_pil = Image.open(self.image_paths[idx]).convert("RGB")
+        mask_pil = Image.open(self.mask_paths[idx]).convert("L")  # full mask (PIL)
+        # Image transform -> tensor CxHxW (resized)
         if self.image_transform:
-            img = self.image_transform(img)
-        if self.mask_transform:
-            weak_mask_tensor = self.mask_transform(full_mask)  # transform for clicks (optional)
+            img = self.image_transform(img_pil)
         else:
-            weak_mask_tensor = TF.to_tensor(full_mask)
+            img = TF.to_tensor(img_pil)
 
-        # Convert mask to boolean for sampling clicks
-        mask_bool = np.array(full_mask) > 0.5
+        # Transform full mask to SAME target size as image (nearest to preserve labels)
+        if self.mask_transform:
+            # mask_transform returns tensor 1xHxW or HxW depending on your function
+            full_mask_t = self.mask_transform(mask_pil)  # should be long tensor  HxW (since your mask_tfm squeezes)
+            # ensure HxW (no channel dim)
+            if full_mask_t.dim() == 3 and full_mask_t.size(0) == 1:
+                full_mask_t = full_mask_t.squeeze(0)
+        else:
+            full_mask_t = TF.to_tensor(mask_pil).squeeze(0).to(torch.long)
 
-        # Sample positive/negative points
+        # Now full_mask_t is a tensor (H_target, W_target) with {0,1} values (long)
+        # Use numpy boolean for sampling (convert to numpy on CPU)
+        mask_bool = full_mask_t.cpu().numpy().astype(bool)
+
+        # Sample positive/negative points in the *transformed* (resized) mask space
         pos_pts, neg_pts = self.sample_points(mask_bool)
 
-        # Convert points to weak mask
-        weak_mask = self.points_to_mask_with_ignore(pos_pts, neg_pts, mask_bool.shape)
+        # Create weak mask in the same HxW as full_mask_t, with ignore index
+        H, W = mask_bool.shape
+        weak_mask = torch.full((H, W), self.ignore_index, dtype=torch.float32)
+        if pos_pts.shape[0] > 0:
+            weak_mask[pos_pts[:, 1], pos_pts[:, 0]] = 1.0
+        if neg_pts.shape[0] > 0:
+            weak_mask[neg_pts[:, 1], neg_pts[:, 0]] = 0.0
 
-        # Convert full mask to tensor if not already
-        if not isinstance(full_mask, torch.Tensor):
-            full_mask_tensor = torch.tensor(mask_bool, dtype=torch.long)
-        else:
-            full_mask_tensor = full_mask
+        # full_mask_t should be long; ensure dtype
+        full_mask_tensor = full_mask_t.to(torch.long)
 
         return img, weak_mask, full_mask_tensor
+
 
 
     # --- Helpers ---

@@ -6,14 +6,13 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import transforms as T
-from torchvision import utils as vutils
 from torchvision.transforms import InterpolationMode as IM
 
 # -----------------------
 # Quick config
 # -----------------------
 model_mode   = "unet"
-dataset_mode = "ph2"
+dataset_mode = "click"
 loss_mode    = "focal"            # uses your lib.losses.FocalLoss
 data_root    = Path("/dtu/datasets1/02516/PH2_Dataset_images") # DRIVE or PH2_Dataset_images
 device       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -159,7 +158,8 @@ if is_clickpoints:
     _, lbls, _ = next(iter(val_loader))
 else:
     _, lbls = next(iter(val_loader))
-counts = torch.bincount(lbls.long().view(-1), minlength=2)
+valid_lbls = lbls[lbls >= 0]
+counts = torch.bincount(valid_lbls.long().view(-1), minlength=2)
 pos = counts[1].item()
 neg = counts[0].item()
 pos_frac = pos / max(pos + neg, 1)
@@ -222,25 +222,6 @@ def _probs_preds_from_logits(logits: torch.Tensor, threshold: float = 0.5):
     preds = (probs >= threshold).float()
     return probs, preds
 
-def _to_3ch(t: torch.Tensor) -> torch.Tensor:
-    if t.dim() == 3: t = t.unsqueeze(1)
-    if t.size(1) == 1: t = t.repeat(1,3,1,1)
-    return t
-
-def save_visuals(inputs, labels, probs, preds, out_dir, epoch, max_items=4):
-    os.makedirs(out_dir, exist_ok=True)
-    k = min(max_items, inputs.size(0))
-    x  = inputs[:k].detach().cpu()
-    y  = labels[:k].detach().cpu()
-    pr = probs[:k].detach().cpu()
-    pd = preds[:k].detach().cpu()
-    if y.dim() == 3:  y  = y.unsqueeze(1)
-    if pr.dim() == 3: pr = pr.unsqueeze(1)
-    if pd.dim() == 3: pd = pd.unsqueeze(1)
-    grid = vutils.make_grid(torch.cat([_to_3ch(x), _to_3ch(y), _to_3ch(pr), _to_3ch(pd)], dim=0),
-                            nrow=k, padding=2, normalize=False)
-    vutils.save_image(grid, os.path.join(out_dir, f"epoch_{epoch:03d}.png"))
-
 def current_lr(optim: torch.optim.Optimizer) -> float:
     return optim.param_groups[0]['lr']
 
@@ -281,19 +262,29 @@ def evaluate(model, loader, device, criterion=None, threshold: float = 0.35):
     for batch in loader:
         if is_clickpoints:
             inputs, weak_lbls, full_lbls = batch
-            labels = full_lbls.to(device, non_blocking=True).float()  # use full for metrics
+            # move tensors to device
+            inputs = inputs.to(device, non_blocking=True)
+            weak_lbls = weak_lbls.to(device, non_blocking=True)
+            full_lbls = full_lbls.to(device, non_blocking=True).float()
+            labels = full_lbls  # use full for metrics
         else:
             inputs, labels = batch
+            inputs = inputs.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True).float()  # (N,H,W) ∈ {0,1}
 
         logits = model(inputs)  # (N,C,H,W)
 
         if criterion is not None:
+            # Use weak labels for loss when available (clickpoints)
+            if is_clickpoints:
+                loss_labels = weak_lbls
+            else:
+                loss_labels = labels
             # If your criterion expects long targets for 2-class heads, handle it:
             if logits.size(1) == 2:
-                loss = criterion(logits, labels.long())
+                loss = criterion(logits, loss_labels.long())
             else:
-                loss = criterion(logits, labels)
+                loss = criterion(logits, loss_labels)
             running_loss += float(loss.item()) * inputs.size(0)
             num_samples += inputs.size(0)
 
@@ -390,19 +381,6 @@ def train(
         val_loss, val_dice, val_iou, val_acc, val_sens, val_spec = evaluate(
             model, val_loader, device, criterion=criterion, threshold=threshold
         )
-
-        # Visualizations
-        vis_out_dir = vis_dir or os.path.join(checkpoint_dir, "vis", run_name)
-        if (epoch % max(vis_every, 1)) == 0:
-            model.eval()
-            with torch.inference_mode():
-                for vis_inputs, vis_labels in val_loader:
-                    vis_inputs = vis_inputs.to(device, non_blocking=True)
-                    vis_labels = vis_labels.to(device, non_blocking=True)
-                    logits_vis = model(vis_inputs)
-                    probs_vis, preds_vis = _probs_preds_from_logits(logits_vis, threshold)
-                    save_visuals(vis_inputs, vis_labels, probs_vis, preds_vis, vis_out_dir, epoch, max_items=vis_max_items)
-                    break  # only first batch
 
         # Logging
         train_loss_epoch = running_loss / max(num_samples, 1)

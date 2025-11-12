@@ -17,6 +17,7 @@ loss_mode    = "focal"            # uses your lib.losses.FocalLoss
 data_root    = Path("/dtu/datasets1/02516/PH2_Dataset_images") # DRIVE or PH2_Dataset_images
 device       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 IGNORE_INDEX = -1
+NUM_SAMPLES = 10
 
 img_tfm = T.Compose([
     T.Resize((512, 512), interpolation=IM.BILINEAR, antialias=True),
@@ -136,10 +137,16 @@ else:
         return (m >= 0.5).to(torch.long).squeeze(0)
 
 # Initialize dataset loaders
-train_ds = DatasetClass(root_dir=dataset_root_dir, split="train",
-                        image_transform=img_tfm, mask_transform=mask_tfm)
-val_ds   = DatasetClass(root_dir=dataset_root_dir, split="val",
-                        image_transform=img_tfm, mask_transform=mask_tfm)
+if dataset_mode == 'click':
+    train_ds = DatasetClass(root_dir=dataset_root_dir, split="train",
+                        image_transform=img_tfm, mask_transform=mask_tfm, total_points = NUM_SAMPLES)
+    val_ds   = DatasetClass(root_dir=dataset_root_dir, split="val",
+                        image_transform=img_tfm, mask_transform=mask_tfm, total_points = NUM_SAMPLES )
+else:
+    train_ds = DatasetClass(root_dir=dataset_root_dir, split="train",
+                            image_transform=img_tfm, mask_transform=mask_tfm)
+    val_ds   = DatasetClass(root_dir=dataset_root_dir, split="val",
+                            image_transform=img_tfm, mask_transform=mask_tfm)
 
 print(f"Train dataset length: {len(train_ds)}")
 print(f"Validation dataset length: {len(val_ds)}")

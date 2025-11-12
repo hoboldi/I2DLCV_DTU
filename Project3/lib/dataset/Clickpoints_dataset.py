@@ -4,7 +4,7 @@ from PIL import Image
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from sklearn.model_selection import train_test_split
+# sklearn not required here; samples are generated using numpy RNG below
 import torchvision.transforms.functional as TF
 
 class Clickpoints_dataset(Dataset):
@@ -67,78 +67,98 @@ class Clickpoints_dataset(Dataset):
 
         # RNG for sampling
         self.rng = np.random.RandomState(seed)
+        self.seed = seed
+
+        # Precompute sampled weak masks and ensure full masks are transformed once.
+        # This makes sampled points stable across epochs and workers.
+        self.precomputed = []  # list of tuples (weak_mask: float32 HxW, full_mask: long HxW)
+        for i, mp in enumerate(self.mask_paths):
+            mask_pil_local = Image.open(mp).convert("L")
+            if self.mask_transform:
+                fm = self.mask_transform(mask_pil_local)
+                if fm.dim() == 3 and fm.size(0) == 1:
+                    fm = fm.squeeze(0)
+            else:
+                fm = TF.to_tensor(mask_pil_local).squeeze(0).to(torch.long)
+
+            # ensure full mask is long 0/1
+            full_mask_t = fm.to(torch.long)
+
+            # Sample using a per-index RNG so samples are deterministic per sample
+            rng = np.random.RandomState(self.seed + i)
+            mask_bool = full_mask_t.cpu().numpy().astype(bool)
+            pos_pts, neg_pts = self.sample_points(mask_bool, rng=rng)
+
+            H, W = mask_bool.shape
+            weak_mask = torch.full((H, W), self.ignore_index, dtype=torch.float32)
+            if pos_pts.shape[0] > 0:
+                weak_mask[pos_pts[:, 1], pos_pts[:, 0]] = 1.0
+            if neg_pts.shape[0] > 0:
+                weak_mask[neg_pts[:, 1], neg_pts[:, 0]] = 0.0
+
+            self.precomputed.append((weak_mask, full_mask_t))
 
     def __len__(self):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        # Load image and mask (PIL)
+        # Load image and use precomputed masks
         img_pil = Image.open(self.image_paths[idx]).convert("RGB")
-        mask_pil = Image.open(self.mask_paths[idx]).convert("L")  # full mask (PIL)
-        # Image transform -> tensor CxHxW (resized)
         if self.image_transform:
             img = self.image_transform(img_pil)
         else:
             img = TF.to_tensor(img_pil)
 
-        # Transform full mask to SAME target size as image (nearest to preserve labels)
-        if self.mask_transform:
-            # mask_transform returns tensor 1xHxW or HxW depending on your function
-            full_mask_t = self.mask_transform(mask_pil)  # should be long tensor  HxW (since your mask_tfm squeezes)
-            # ensure HxW (no channel dim)
-            if full_mask_t.dim() == 3 and full_mask_t.size(0) == 1:
-                full_mask_t = full_mask_t.squeeze(0)
-        else:
-            full_mask_t = TF.to_tensor(mask_pil).squeeze(0).to(torch.long)
-
-        # Now full_mask_t is a tensor (H_target, W_target) with {0,1} values (long)
-        # Use numpy boolean for sampling (convert to numpy on CPU)
-        mask_bool = full_mask_t.cpu().numpy().astype(bool)
-
-        # Sample positive/negative points in the *transformed* (resized) mask space
-        pos_pts, neg_pts = self.sample_points(mask_bool)
-
-        # Create weak mask in the same HxW as full_mask_t, with ignore index
-        H, W = mask_bool.shape
-        weak_mask = torch.full((H, W), self.ignore_index, dtype=torch.float32)
-        if pos_pts.shape[0] > 0:
-            weak_mask[pos_pts[:, 1], pos_pts[:, 0]] = 1.0
-        if neg_pts.shape[0] > 0:
-            weak_mask[neg_pts[:, 1], neg_pts[:, 0]] = 0.0
-
-        # full_mask_t should be long; ensure dtype
-        full_mask_tensor = full_mask_t.to(torch.long)
-
-        return img, weak_mask, full_mask_tensor
+        weak_mask, full_mask_tensor = self.precomputed[idx]
+        # return clones to avoid accidental in-place modification of shared tensors
+        return img, weak_mask.clone(), full_mask_tensor.clone()
 
 
 
     # --- Helpers ---
-    def sample_points(self, mask_bool):
+    def sample_points(self, mask_bool, rng=None):
         H, W = mask_bool.shape
         total_pixels = H * W
         lesion_pixels = mask_bool.sum()
         lesion_fraction = float(lesion_pixels) / float(total_pixels) if total_pixels > 0 else 0.0
 
-        pos_n = max(int(round(self.total_points * lesion_fraction)), 1)
-        neg_n = max(self.total_points - pos_n, 1)
+        # 1. Compute tentative numbers based on fraction
+        pos_float = self.total_points * lesion_fraction
+        pos_n = max(int(np.floor(pos_float)), 1)  # at least 1
+        neg_n = max(self.total_points - pos_n, 1) # at least 1
+
+        # 2. Adjust if total exceeds total_points due to min=1
+        total_assigned = pos_n + neg_n
+        if total_assigned > self.total_points:
+            # reduce the larger one first
+            if pos_n > neg_n:
+                pos_n -= total_assigned - self.total_points
+            else:
+                neg_n -= total_assigned - self.total_points
+
+        # 3. Ensure we don’t request more than available pixels
+        pos_n = min(pos_n, lesion_indices.size)
+        neg_n = min(neg_n, background_indices.size)
 
         lesion_indices = np.flatnonzero(mask_bool.ravel())
         background_indices = np.flatnonzero((~mask_bool).ravel())
-
-        pos_n = min(pos_n, lesion_indices.size)
-        neg_n = min(neg_n, background_indices.size)
 
         pos_pts = np.empty((0, 2), dtype=int)
         neg_pts = np.empty((0, 2), dtype=int)
 
         if lesion_indices.size > 0:
-            chosen_pos = self.rng.choice(lesion_indices, size=pos_n, replace=False)
+            if rng is None:
+                chosen_pos = self.rng.choice(lesion_indices, size=pos_n, replace=False)
+            else:
+                chosen_pos = rng.choice(lesion_indices, size=pos_n, replace=False)
             rows, cols = np.unravel_index(chosen_pos, (H, W))
             pos_pts = np.vstack([cols, rows]).T
 
         if background_indices.size > 0:
-            chosen_neg = self.rng.choice(background_indices, size=neg_n, replace=False)
+            if rng is None:
+                chosen_neg = self.rng.choice(background_indices, size=neg_n, replace=False)
+            else:
+                chosen_neg = rng.choice(background_indices, size=neg_n, replace=False)
             rows, cols = np.unravel_index(chosen_neg, (H, W))
             neg_pts = np.vstack([cols, rows]).T
 

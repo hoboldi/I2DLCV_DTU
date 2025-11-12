@@ -17,7 +17,7 @@ loss_mode    = "focal"            # uses your lib.losses.FocalLoss
 data_root    = Path("/dtu/datasets1/02516/PH2_Dataset_images") # DRIVE or PH2_Dataset_images
 device       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 IGNORE_INDEX = -1
-NUM_SAMPLES = 10
+NUM_SAMPLES = 2
 
 img_tfm = T.Compose([
     T.Resize((512, 512), interpolation=IM.BILINEAR, antialias=True),
@@ -151,6 +151,48 @@ else:
 print(f"Train dataset length: {len(train_ds)}")
 print(f"Validation dataset length: {len(val_ds)}")
 
+# Quick sanity check for clickpoints weak masks: ensure weak masks contain
+# the expected number of labeled pixels (non -1). We report how many images
+# have exactly 2 labeled pixels, fewer, or more.
+if dataset_mode == 'click':
+    total = len(train_ds)
+    eq2 = 0
+    lt2 = 0
+    gt2 = 0
+    examples_lt2 = []
+    examples_gt2 = []
+    # iterate dataset directly (uses precomputed masks in Clickpoints_dataset)
+    for i in range(total):
+        item = train_ds[i]
+        # dataset returns (img, weak_mask, full_mask)
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            weak = item[1]
+        else:
+            # unexpected format
+            continue
+        # count non-ignored pixels
+        try:
+            n_labeled = int((weak != IGNORE_INDEX).sum().item())
+        except Exception:
+            # in case weak is not a tensor for some reason
+            n_labeled = 0
+        if n_labeled == 2:
+            eq2 += 1
+        elif n_labeled < 2:
+            lt2 += 1
+            if len(examples_lt2) < 5:
+                examples_lt2.append((i, n_labeled))
+        else:
+            gt2 += 1
+            if len(examples_gt2) < 5:
+                examples_gt2.append((i, n_labeled))
+
+    print(f"[check] train samples={total} | exactly 2: {eq2} | <2: {lt2} | >2: {gt2}")
+    if examples_lt2:
+        print(f"  examples with <2 labeled pixels (idx,count): {examples_lt2}")
+    if examples_gt2:
+        print(f"  examples with >2 labeled pixels (idx,count): {examples_gt2}")
+
 train_loader = DataLoader(train_ds, batch_size=8, shuffle=True,  num_workers=4, pin_memory=True)
 val_loader   = DataLoader(val_ds,   batch_size=8, shuffle=False, num_workers=4, pin_memory=True)
 
@@ -159,6 +201,8 @@ is_clickpoints = dataset_mode == "click"
 
 # -----------------------
 # Label stats -> α for FocalLoss (and optional bias init)
+# Compute class prior from FULL ground-truth masks (dense labels) across
+# the entire validation set — this gives a realistic prior for alpha/weighting.
 # -----------------------
 if is_clickpoints:
     # get weak masks for training stats
@@ -295,14 +339,14 @@ def evaluate(model, loader, device, criterion=None, threshold: float = 0.35):
             running_loss += float(loss.item()) * inputs.size(0)
             num_samples += inputs.size(0)
 
-        probs = _probs_from_logits(logits)  # (N,H,W) in [0,1]
+        probs, preds = _probs_preds_from_logits(logits)  # (N,H,W) in [0,1]
 
-        tp += (probs * labels).sum().item()
-        fp += (probs * (1.0 - labels)).sum().item()
-        tn += ((1.0 - probs) * (1.0 - labels)).sum().item()
-        fn += ((1.0 - probs) * labels).sum().item()
+        tp += (preds * labels).sum().item()
+        fp += (preds * (1.0 - labels)).sum().item()
+        tn += ((1.0 - preds) * (1.0 - labels)).sum().item()
+        fn += ((1.0 - preds) * labels).sum().item()
 
-        sum_p += probs.sum().item()
+        sum_p += preds.sum().item()
         sum_y += labels.sum().item()
 
     dice = (2.0 * tp + eps) / (sum_p + sum_y + eps)

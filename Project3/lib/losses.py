@@ -22,13 +22,19 @@ class DiceLoss(nn.Module):
 
 class FocalLoss(nn.Module):
     def __init__(self, alpha: float = 0.25, gamma: float = 2.0,
-                 reduction: str = "mean", ignore_index: Optional[int] = None):
+                 reduction: str = "mean", ignore_index: Optional[int] = None,
+                 max_labeled_points: Optional[int] = None,
+                 raise_on_too_many: bool = False):
         super().__init__()
         assert reduction in ("none", "mean", "sum")
         self.alpha = alpha
         self.gamma = gamma
         self.reduction = reduction
         self.ignore_index = ignore_index
+        # Optional debug: if set, check per-sample labeled pixel counts
+        # (non-ignore) and either print a warning or raise an error.
+        self.max_labeled_points = max_labeled_points
+        self.raise_on_too_many = raise_on_too_many
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         # targets: (N,H,W) in {0,1}
@@ -41,18 +47,35 @@ class FocalLoss(nn.Module):
 
         if targets.dim() == 4 and targets.size(1) == 1:
             targets = targets.squeeze(1)                 # -> (N,H,W)
+
+        # Keep a copy for checks before casting
+        raw_targets = targets
         targets = targets.float()
 
         # optional ignore mask
         if self.ignore_index is not None:
-            valid = (targets != self.ignore_index)
+            valid = (raw_targets != self.ignore_index)
             t = torch.where(valid, targets, torch.zeros_like(targets))
         else:
-            valid = None
+            valid = torch.ones_like(targets, dtype=torch.bool)
             t = targets
 
+        """# Simple checks: print if any sample has more than 2 or more than 3 labeled pixels
+        v = valid
+        if v.dim() == 2:
+            v = v.unsqueeze(0)
+        per_sample_counts = v.view(v.size(0), -1).sum(dim=1)
+        gt2_idx = (per_sample_counts > 2).nonzero(as_tuple=False).squeeze(1)
+        if gt2_idx.numel() > 0:
+            samples = [(int(i.item()), int(per_sample_counts[i].item())) for i in gt2_idx[:10]]
+            print(f"[warning] FocalLoss: samples with >2 labeled pixels: {samples}")
+        gt3_idx = (per_sample_counts > 3).nonzero(as_tuple=False).squeeze(1)
+        if gt3_idx.numel() > 0:
+            samples = [(int(i.item()), int(per_sample_counts[i].item())) for i in gt3_idx[:10]]
+            print(f"[warning] FocalLoss: samples with >3 labeled pixels: {samples}")"""
+
         # BCE with logits (per-pixel)
-        bce = F.binary_cross_entropy_with_logits(logits, t, reduction="none")
+        bce = F.binary_cross_entropy_with_logits(logits, t, reduction="none") 
         log_pt = -bce
         pt = torch.exp(log_pt).clamp(min=1e-8, max=1.0)
 

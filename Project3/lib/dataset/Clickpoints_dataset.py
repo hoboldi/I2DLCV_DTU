@@ -73,23 +73,32 @@ class Clickpoints_dataset(Dataset):
     def __getitem__(self, idx):
         # Load image and mask
         img = Image.open(self.image_paths[idx]).convert("RGB")
-        msk = Image.open(self.mask_paths[idx]).convert("L")
+        full_mask = Image.open(self.mask_paths[idx]).convert("L")  # full mask
 
         if self.image_transform:
             img = self.image_transform(img)
         if self.mask_transform:
-            msk = self.mask_transform(msk)
+            weak_mask_tensor = self.mask_transform(full_mask)  # transform for clicks (optional)
+        else:
+            weak_mask_tensor = TF.to_tensor(full_mask)
 
-        # Convert mask to boolean
-        mask_bool = np.array(msk.squeeze()) > 0.5
+        # Convert mask to boolean for sampling clicks
+        mask_bool = np.array(full_mask) > 0.5
 
         # Sample positive/negative points
         pos_pts, neg_pts = self.sample_points(mask_bool)
 
-        # Convert points to single-channel mask with ignore_index
+        # Convert points to weak mask
         weak_mask = self.points_to_mask_with_ignore(pos_pts, neg_pts, mask_bool.shape)
 
-        return img, weak_mask
+        # Convert full mask to tensor if not already
+        if not isinstance(full_mask, torch.Tensor):
+            full_mask_tensor = torch.tensor(mask_bool, dtype=torch.long)
+        else:
+            full_mask_tensor = full_mask
+
+        return img, weak_mask, full_mask_tensor
+
 
     # --- Helpers ---
     def sample_points(self, mask_bool):

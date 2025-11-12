@@ -13,10 +13,11 @@ from torchvision.transforms import InterpolationMode as IM
 # Quick config
 # -----------------------
 model_mode   = "unet"
-dataset_mode = "drive"
+dataset_mode = "ph2"
 loss_mode    = "focal"            # uses your lib.losses.FocalLoss
 data_root    = Path("/dtu/datasets1/02516/PH2_Dataset_images") # DRIVE or PH2_Dataset_images
 device       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+IGNORE_INDEX = -1
 
 img_tfm = T.Compose([
     T.Resize((512, 512), interpolation=IM.BILINEAR, antialias=True),
@@ -104,6 +105,7 @@ DatasetMap = {
 ModelClass = import_class("Project3.lib.model", "lib.model", MODEL_MAP[model_mode][0])
 model = ModelClass().to(device)
 
+
 DatasetClassName, dataset_root_dir = DatasetMap[dataset_mode]
 DatasetClass = import_class("Project3.lib.dataset", "lib.dataset", DatasetClassName)
 
@@ -146,12 +148,18 @@ print(f"Validation dataset length: {len(val_ds)}")
 train_loader = DataLoader(train_ds, batch_size=8, shuffle=True,  num_workers=4, pin_memory=True)
 val_loader   = DataLoader(val_ds,   batch_size=8, shuffle=False, num_workers=4, pin_memory=True)
 
+# Whether this dataset returns weak + full masks
+is_clickpoints = dataset_mode == "click"
 
 # -----------------------
 # Label stats -> α for FocalLoss (and optional bias init)
 # -----------------------
-_, lbls = next(iter(val_loader))
-counts = torch.bincount(lbls.view(-1), minlength=2)
+if is_clickpoints:
+    # get weak masks for training stats
+    _, lbls, _ = next(iter(val_loader))
+else:
+    _, lbls = next(iter(val_loader))
+counts = torch.bincount(lbls.long().view(-1), minlength=2)
 pos = counts[1].item()
 neg = counts[0].item()
 pos_frac = pos / max(pos + neg, 1)
@@ -179,8 +187,10 @@ measures = import_module("measure", "Project3.lib.measure", "lib.measure")
 
 def make_criterion(mode: str) -> nn.Module:
     m = mode.lower()
+    ignore_index = IGNORE_INDEX if dataset_mode == "click" else None
+
     if m == "focal":
-        return losses.FocalLoss(alpha=alpha, gamma=2.0, reduction="mean")
+        return losses.FocalLoss(alpha=alpha, gamma=2.0, reduction="mean", ignore_index=ignore_index)
     if m in {"ce", "crossentropy"}:
         # Weights to counter class imbalance (for 2-class heads only)
         w = torch.tensor([1.0, max(1.0, neg/max(pos,1))], device=device, dtype=torch.float32)
@@ -268,9 +278,13 @@ def evaluate(model, loader, device, criterion=None, threshold: float = 0.35):
     sum_p = sum_y = 0.0
     eps = 1e-8
 
-    for inputs, labels in loader:
-        inputs = inputs.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True).float()  # (N,H,W) ∈ {0,1}
+    for batch in loader:
+        if is_clickpoints:
+            inputs, weak_lbls, full_lbls = batch
+            labels = full_lbls.to(device, non_blocking=True).float()  # use full for metrics
+        else:
+            inputs, labels = batch
+            labels = labels.to(device, non_blocking=True).float()  # (N,H,W) ∈ {0,1}
 
         logits = model(inputs)  # (N,C,H,W)
 
@@ -342,9 +356,15 @@ def train(
         running_loss, num_samples = 0.0, 0
         optimizer.zero_grad(set_to_none=True)
 
-        for step, (inputs, labels) in enumerate(train_loader, start=1):
+        for step, batch in enumerate(train_loader, start=1):
+            if is_clickpoints:
+                inputs, weak_lbls, full_lbls = batch
+                labels = weak_lbls.to(device, non_blocking=True)
+            else:
+                inputs, labels = batch
+                labels = labels.to(device, non_blocking=True)
+
             inputs = inputs.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
 
             with torch.cuda.amp.autocast(enabled=use_amp):
                 logits = model(inputs)         # (N,C,H,W)

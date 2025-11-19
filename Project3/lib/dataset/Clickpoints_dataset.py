@@ -137,11 +137,11 @@ class Clickpoints_dataset(Dataset):
                 neg_n -= total_assigned - self.total_points
 
         # 3. Ensure we don’t request more than available pixels
-        pos_n = min(pos_n, lesion_indices.size)
-        neg_n = min(neg_n, background_indices.size)
-
         lesion_indices = np.flatnonzero(mask_bool.ravel())
         background_indices = np.flatnonzero((~mask_bool).ravel())
+
+        pos_n = min(pos_n, lesion_indices.size)
+        neg_n = min(neg_n, background_indices.size)
 
         pos_pts = np.empty((0, 2), dtype=int)
         neg_pts = np.empty((0, 2), dtype=int)

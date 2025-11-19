@@ -5,3 +5,11 @@ hotdog_nothotdog/
 
 # Ignore PyTorch model files
 *.pth
+
+# Ignore visualizations
+*.jpg
+*.png
+
+potholes
+
+*.csv

@@ -3,11 +3,13 @@ from pathlib import Path
 from typing import Optional
 
 import torch
+import argparse
+import csv
+
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import transforms as T
 from torchvision.transforms import InterpolationMode as IM
-
 # -----------------------
 # Quick config
 # -----------------------
@@ -17,7 +19,32 @@ loss_mode    = "focal"            # uses your lib.losses.FocalLoss
 data_root    = Path("/dtu/datasets1/02516/PH2_Dataset_images") # DRIVE or PH2_Dataset_images
 device       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 IGNORE_INDEX = -1
-NUM_SAMPLES = 2
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--num_samples", type=int, default=2, help="Number of sampled points for click dataset")
+args = parser.parse_args()
+
+# Ensure the summary file exists with header
+summary_path = os.path.join("checkpoints", "ablation", "ablation_summary.csv")
+os.makedirs(os.path.dirname(summary_path), exist_ok=True)
+
+if not os.path.exists(summary_path):
+    with open(summary_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "epoch",
+            "num_samples",
+            "train_loss",
+            "val_loss",
+            "val_dice",
+            "val_iou",
+            "val_acc",
+            "val_sens",
+            "val_spec"
+        ])
+
+NUM_SAMPLES = args.num_samples
+
 
 img_tfm = T.Compose([
     T.Resize((512, 512), interpolation=IM.BILINEAR, antialias=True),
@@ -148,53 +175,9 @@ else:
     val_ds   = DatasetClass(root_dir=dataset_root_dir, split="val",
                             image_transform=img_tfm, mask_transform=mask_tfm)
 
-print(f"Train dataset length: {len(train_ds)}")
-print(f"Validation dataset length: {len(val_ds)}")
 
-# Quick sanity check for clickpoints weak masks: ensure weak masks contain
-# the expected number of labeled pixels (non -1). We report how many images
-# have exactly 2 labeled pixels, fewer, or more.
-if dataset_mode == 'click':
-    total = len(train_ds)
-    eq2 = 0
-    lt2 = 0
-    gt2 = 0
-    examples_lt2 = []
-    examples_gt2 = []
-    # iterate dataset directly (uses precomputed masks in Clickpoints_dataset)
-    for i in range(total):
-        item = train_ds[i]
-        # dataset returns (img, weak_mask, full_mask)
-        if isinstance(item, (list, tuple)) and len(item) >= 2:
-            weak = item[1]
-        else:
-            # unexpected format
-            continue
-        # count non-ignored pixels
-        try:
-            n_labeled = int((weak != IGNORE_INDEX).sum().item())
-        except Exception:
-            # in case weak is not a tensor for some reason
-            n_labeled = 0
-        if n_labeled == 2:
-            eq2 += 1
-        elif n_labeled < 2:
-            lt2 += 1
-            if len(examples_lt2) < 5:
-                examples_lt2.append((i, n_labeled))
-        else:
-            gt2 += 1
-            if len(examples_gt2) < 5:
-                examples_gt2.append((i, n_labeled))
-
-    print(f"[check] train samples={total} | exactly 2: {eq2} | <2: {lt2} | >2: {gt2}")
-    if examples_lt2:
-        print(f"  examples with <2 labeled pixels (idx,count): {examples_lt2}")
-    if examples_gt2:
-        print(f"  examples with >2 labeled pixels (idx,count): {examples_gt2}")
-
-train_loader = DataLoader(train_ds, batch_size=8, shuffle=True,  num_workers=4, pin_memory=True)
-val_loader   = DataLoader(val_ds,   batch_size=8, shuffle=False, num_workers=4, pin_memory=True)
+train_loader = DataLoader(train_ds, batch_size=8, shuffle=True,  num_workers=1)
+val_loader   = DataLoader(val_ds,   batch_size=8, shuffle=False, num_workers=1)
 
 # Whether this dataset returns weak + full masks
 is_clickpoints = dataset_mode == "click"
@@ -379,10 +362,8 @@ def train(
     run_name: str = "run",
     early_stopping_patience: Optional[int] = 20,
     threshold: float = 0.5,
-    vis_every: int = 1,
-    vis_max_items: int = 4,
-    vis_dir: Optional[str] = None,
 ):
+    
     model = model.to(device)
     if optimizer is None:
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -450,33 +431,39 @@ def train(
               f"Dice={val_dice:.4f} | IoU={val_iou:.4f} | "
               f"Acc={val_acc:.4f} | Sens={val_sens:.4f} | Spec={val_spec:.4f}")
 
-        # Save last
+        results_file = os.path.join(checkpoint_dir, "ablation_summary.csv")
         os.makedirs(checkpoint_dir, exist_ok=True)
-        torch.save({
-            "epoch": epoch,
-            "model_state": model.state_dict(),
-            "optimizer_state": optimizer.state_dict(),
-            "scheduler_state": scheduler.state_dict(),
-            "history": history,
-        }, os.path.join(checkpoint_dir, f"{run_name}_last.pt"))
 
-        # Save best (by Dice)
         if val_dice > best_val_dice:
-            best_val_dice = val_dice; epochs_no_improve = 0
-            torch.save({
+            best_val_dice = val_dice
+            epochs_no_improve = 0
+            best_val_metrics = {
                 "epoch": epoch,
-                "model_state": model.state_dict(),
-                "optimizer_state": optimizer.state_dict(),
-                "scheduler_state": scheduler.state_dict(),
-                "history": history,
-            }, os.path.join(checkpoint_dir, f"{run_name}_best.pt"))
-            print(f"  ↳ New best Dice: {best_val_dice:.4f} (checkpoint saved)")
+                "num_samples": NUM_SAMPLES,
+                "train_loss": train_loss_epoch,
+                "val_loss": val_loss,
+                "val_dice": val_dice,
+                "val_iou": val_iou,
+                "val_acc": val_acc,
+                "val_sens": val_sens,
+                "val_spec": val_spec,
+            }
+            print(f"  ↳ New best Dice: {best_val_dice:.4f}")
+
         else:
             epochs_no_improve += 1
             if early_stopping_patience is not None and epochs_no_improve >= early_stopping_patience:
                 print(f"Early stopping (no improvement in {early_stopping_patience} epochs).")
                 break
+    results_file = os.path.join(checkpoint_dir, "ablation_summary.csv")
+    os.makedirs(checkpoint_dir, exist_ok=True)
 
+    # Write a single line for this run
+    with open(results_file, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=best_val_metrics.keys())
+        if f.tell() == 0:
+            writer.writeheader()
+        writer.writerow(best_val_metrics)
     return history
 
 # -----------------------
@@ -491,10 +478,7 @@ history = train(
     epochs=200,
     lr=1e-4,
     weight_decay=1e-4,
-    checkpoint_dir="checkpoints",
-    run_name=f"{model_mode}_{dataset_mode}_{loss_mode}",
-    early_stopping_patience=200,
-    vis_every=10,
-    vis_max_items=4,
-    vis_dir=None,
+    checkpoint_dir="checkpoints/ablation",
+    run_name=f"{model_mode}_{dataset_mode}_{loss_mode}_N{NUM_SAMPLES}",
+    early_stopping_patience=30,
 )

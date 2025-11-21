@@ -106,6 +106,5 @@ if __name__ == "__main__":
         output_csv=args.output_csv,
         max_proposals=args.max_proposals,
         step=args.step,
-        iou_threshold=args.iou_threshold,
         method_name=args.method_name
     )

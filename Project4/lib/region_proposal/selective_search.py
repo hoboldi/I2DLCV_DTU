@@ -33,6 +33,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--images_dir', type=str, default="/dtu/datasets1/02516/potholes/images")
     parser.add_argument('--save_dir', type=str, default="data/proposals/selective_search")
-    parser.add_argument('--max_proposals', type=int, default=2000)
+    parser.add_argument('--max_proposals', type=int, default=500)
     args = parser.parse_args()
     main(args.images_dir, args.save_dir, args.max_proposals)

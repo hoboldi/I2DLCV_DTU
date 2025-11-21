@@ -19,7 +19,6 @@ def load_pascal_voc_boxes(xml_file):
     return np.array(boxes)
 
 def compute_iou(box, gt_box):
-    """Compute Intersection over Union (IoU) of a proposal with a GT box."""
     x1 = max(box[0], gt_box[0])
     y1 = max(box[1], gt_box[1])
     x2 = min(box[2], gt_box[2])
@@ -38,7 +37,6 @@ def compute_iou(box, gt_box):
     return inter_area / union_area
 
 def evaluate_image(proposals, gt_boxes, iou_threshold=0.5):
-    """Evaluate recall and avg_iou for a single image and top-N proposals."""
     recalls = []
     ious = []
     for gt in gt_boxes:
@@ -49,15 +47,26 @@ def evaluate_image(proposals, gt_boxes, iou_threshold=0.5):
     avg_iou = sum(ious) / len(gt_boxes) if len(gt_boxes) > 0 else 0
     return recall, avg_iou
 
-def main(proposals_dir, annotations_dir, output_csv, max_proposals=2000, step=10, iou_thresholds= [0.5, 0.6, 0.7], method_name="selective_search"):
-    os.makedirs(os.path.dirname(output_csv), exist_ok=True)
-    
+def main(proposals_dir, annotations_dir, output_csv, save_dir,
+         max_proposals=2000, step=10, iou_thresholds=[0.3, 0.5, 0.7], method_name="selective_search"):
+
+    # Create save directory if it doesn't exist
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Construct file paths for saving proposals and evaluation CSV
+    proposals_npz_path = os.path.join(save_dir, f"{method_name}_proposals.npz")
+    output_csv_path = os.path.join(save_dir, f"{method_name}_evaluation.csv")
+
+    # The rest of your code can now use these paths
     proposal_files = sorted([f for f in os.listdir(proposals_dir) if f.endswith('.npy')])
     all_results = []
+    all_proposals_dict = {}
 
     for pf in proposal_files:
         image_id = os.path.splitext(pf)[0]
         proposals = np.load(os.path.join(proposals_dir, pf))
+        all_proposals_dict[image_id] = proposals  # store for npz
+
         xml_file = os.path.join(annotations_dir, image_id + '.xml')
         if not os.path.exists(xml_file):
             print(f"Warning: XML not found for {image_id}, skipping.")
@@ -85,25 +94,33 @@ def main(proposals_dir, annotations_dir, output_csv, max_proposals=2000, step=10
             result.update(recall_dict)
             all_results.append(result)
 
+    # Save evaluation CSV
     df = pd.DataFrame(all_results)
-    df.to_csv(output_csv, index=False)
-    print(f"Evaluation complete. Results saved to {output_csv}")
+    df.to_csv(output_csv_path, index=False)
+    print(f"Evaluation complete. Results saved to {output_csv_path}")
+
+    # Save all proposals
+    np.savez_compressed(proposals_npz_path, **all_proposals_dict)
+    print(f"All proposals saved to {proposals_npz_path}")
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--proposals_dir', type=str, required=True, help="Directory containing .npy proposal files")
-    parser.add_argument('--annotations_dir', type=str, required=True, help="Directory containing Pascal VOC XML annotations")
-    parser.add_argument('--output_csv', type=str, required=True, help="CSV path to save evaluation results")
-    parser.add_argument('--max_proposals', type=int, default=2000, help="Maximum number of proposals per image")
-    parser.add_argument('--step', type=int, default=10, help="Step size for top-N proposals")
-    parser.add_argument('--method_name', type=str, default="selective_search", help="Name of the proposal method")
+    parser.add_argument('--proposals_dir', type=str, required=True)
+    parser.add_argument('--annotations_dir', type=str, required=True)
+    parser.add_argument('--output_csv', type=str, required=True)
+    parser.add_argument('--proposals_npz', type=str, required=True,
+                        help="Path to save all proposals in compressed npz")
+    parser.add_argument('--max_proposals', type=int, default=2000)
+    parser.add_argument('--step', type=int, default=10)
+    parser.add_argument('--method_name', type=str, default="selective_search")
     args = parser.parse_args()
 
     main(
         proposals_dir=args.proposals_dir,
         annotations_dir=args.annotations_dir,
         output_csv=args.output_csv,
+        proposals_npz_path=args.proposals_npz,
         max_proposals=args.max_proposals,
         step=args.step,
         method_name=args.method_name

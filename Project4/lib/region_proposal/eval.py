@@ -1,8 +1,8 @@
-# evaluate_proposals.py
 import os
 import numpy as np
 import xml.etree.ElementTree as ET
 import pandas as pd
+from tqdm import tqdm
 
 def load_pascal_voc_boxes(xml_file):
     """Load ground-truth boxes from a Pascal VOC XML file."""
@@ -18,55 +18,101 @@ def load_pascal_voc_boxes(xml_file):
         boxes.append([x1, y1, x2, y2])
     return np.array(boxes)
 
-def compute_iou(box, gt_box):
-    x1 = max(box[0], gt_box[0])
-    y1 = max(box[1], gt_box[1])
-    x2 = min(box[2], gt_box[2])
-    y2 = min(box[3], gt_box[3])
-    
-    inter_w = max(0, x2 - x1)
-    inter_h = max(0, y2 - y1)
+def compute_iou_vectorized(proposals, gt_boxes):
+    """
+    proposals: (N,4) [x1,y1,x2,y2]
+    gt_boxes: (M,4)
+    returns: (N,M) IoU matrix
+    """
+    N = proposals.shape[0]
+    M = gt_boxes.shape[0]
+
+    # Expand dims to broadcast
+    boxes1 = np.expand_dims(proposals, 1)  # (N,1,4)
+    boxes2 = np.expand_dims(gt_boxes, 0)   # (1,M,4)
+
+    x1 = np.maximum(boxes1[:,:,0], boxes2[:,:,0])
+    y1 = np.maximum(boxes1[:,:,1], boxes2[:,:,1])
+    x2 = np.minimum(boxes1[:,:,2], boxes2[:,:,2])
+    y2 = np.minimum(boxes1[:,:,3], boxes2[:,:,3])
+
+    inter_w = np.maximum(0, x2 - x1)
+    inter_h = np.maximum(0, y2 - y1)
     inter_area = inter_w * inter_h
-    
-    box_area = (box[2]-box[0])*(box[3]-box[1])
-    gt_area = (gt_box[2]-gt_box[0])*(gt_box[3]-gt_box[1])
-    
-    union_area = box_area + gt_area - inter_area
-    if union_area == 0:
-        return 0
-    return inter_area / union_area
 
-def evaluate_image(proposals, gt_boxes, iou_threshold=0.5):
-    recalls = []
-    ious = []
-    for gt in gt_boxes:
-        iou_max = max([compute_iou(gt, prop) for prop in proposals])
-        ious.append(iou_max)
-        recalls.append(int(iou_max >= iou_threshold))
-    recall = sum(recalls) / len(gt_boxes) if len(gt_boxes) > 0 else 0
-    avg_iou = sum(ious) / len(gt_boxes) if len(gt_boxes) > 0 else 0
-    return recall, avg_iou
+    area1 = (boxes1[:,:,2]-boxes1[:,:,0]) * (boxes1[:,:,3]-boxes1[:,:,1])
+    area2 = (boxes2[:,:,2]-boxes2[:,:,0]) * (boxes2[:,:,3]-boxes2[:,:,1])
 
-def main(proposals_dir, annotations_dir, output_csv, save_dir,
-         max_proposals=2000, step=10, iou_thresholds=[0.3, 0.5, 0.7], method_name="selective_search"):
+    union_area = area1 + area2 - inter_area
+    iou = np.zeros_like(inter_area)
+    mask = union_area > 0
+    iou[mask] = inter_area[mask] / union_area[mask]
+    return iou
 
-    # Create save directory if it doesn't exist
+def xywh_to_xyxy(proposals):
+    """
+    Convert [x,y,w,h] or [x,y,w,h,score] -> [x1,y1,x2,y2,(score)]
+    """
+    if proposals.shape[1] == 4:
+        x, y, w, h = proposals.T
+        return np.stack([x, y, x + w, y + h], axis=1)
+    elif proposals.shape[1] == 5:
+        x, y, w, h, score = proposals.T
+        return np.stack([x, y, x + w, y + h, score], axis=1)
+    else:
+        raise ValueError("Proposals must have 4 or 5 columns")
+
+def evaluate_topN_vectorized(proposals_xyxy, gt_boxes, topN_list, iou_thresholds=[0.3,0.5,0.7]):
+    """
+    Compute top-N recalls and MABO.
+    proposals_xyxy: (N,4) or (N,5)
+    gt_boxes: (M,4)
+    topN_list: list of ints
+    Returns dict: {N: {'recall_0.5':..., 'avg_iou':...}}
+    """
+    # Sort by score if present
+    if proposals_xyxy.shape[1] == 5:
+        proposals_xyxy = proposals_xyxy[proposals_xyxy[:,4].argsort()[::-1]]
+
+    results = {}
+    for N in topN_list:
+        topN = proposals_xyxy[:N,:4]  # ignore score for IoU
+        if len(gt_boxes) == 0 or len(topN) == 0:
+            best_ious = np.array([])
+        else:
+            ious = compute_iou_vectorized(topN, gt_boxes)  # (N,M)
+            best_ious = ious.max(axis=0)  # max IoU per GT box
+
+        recall_dict = {f"recall_{t:.2f}": float(np.mean(best_ious >= t) if len(best_ious) > 0 else 0.0)
+                       for t in iou_thresholds}
+        avg_iou = float(best_ious.mean() if len(best_ious) > 0 else 0.0)
+        recall_dict['avg_iou'] = avg_iou
+        results[N] = recall_dict
+    return results
+
+# -------------------
+# Main evaluation
+# -------------------
+def main(proposals_dir, annotations_dir, save_dir,
+         max_proposals=2000, step=10, iou_thresholds=[0.3,0.5,0.7], method_name="selective_search"):
+
     os.makedirs(save_dir, exist_ok=True)
-
-    # Construct file paths for saving proposals and evaluation CSV
-    proposals_npz_path = os.path.join(save_dir, f"{method_name}_proposals.npz")
     output_csv_path = os.path.join(save_dir, f"{method_name}_evaluation.csv")
 
-    # The rest of your code can now use these paths
     proposal_files = sorted([f for f in os.listdir(proposals_dir) if f.endswith('.npy')])
     all_results = []
-    all_proposals_dict = {}
 
-    for pf in proposal_files:
+    for pf in tqdm(proposal_files, desc=f"Evaluating {method_name}"):
         image_id = os.path.splitext(pf)[0]
         proposals = np.load(os.path.join(proposals_dir, pf))
-        all_proposals_dict[image_id] = proposals  # store for npz
 
+        # Convert to x1,y1,x2,y2 (preserves score if present)
+        proposals_xyxy = xywh_to_xyxy(proposals)
+
+        # Top-N list
+        topN_list = list(range(step, min(max_proposals,len(proposals_xyxy))+1, step))
+
+        # Load GT boxes
         xml_file = os.path.join(annotations_dir, image_id + '.xml')
         if not os.path.exists(xml_file):
             print(f"Warning: XML not found for {image_id}, skipping.")
@@ -74,53 +120,46 @@ def main(proposals_dir, annotations_dir, output_csv, save_dir,
         gt_boxes = load_pascal_voc_boxes(xml_file)
         num_gt = len(gt_boxes)
 
-        for N in range(step, min(max_proposals, len(proposals)) + 1, step):
-            topN = proposals[:N]
-            recall_dict = {}
-            for t in iou_thresholds:
-                recall_t, _ = evaluate_image(topN, gt_boxes, iou_threshold=t)
-                recall_dict[f"recall_{t:.2f}"] = recall_t
-
-            # Average IoU (all best overlaps) is always computed without threshold
-            _, avg_iou = evaluate_image(topN, gt_boxes, iou_threshold=0)  # threshold ignored
-
+        # Evaluate top-N
+        metrics = evaluate_topN_vectorized(proposals_xyxy, gt_boxes, topN_list, iou_thresholds)
+        for N in topN_list:
             result = {
                 'image_id': image_id,
                 'method': method_name,
                 'num_proposals': N,
-                'avg_iou': avg_iou,
-                'num_gt_boxes': num_gt
+                'num_gt_boxes': num_gt,
             }
-            result.update(recall_dict)
+            result.update(metrics[N])
             all_results.append(result)
 
-    # Save evaluation CSV
+    # Save CSV
     df = pd.DataFrame(all_results)
     df.to_csv(output_csv_path, index=False)
     print(f"Evaluation complete. Results saved to {output_csv_path}")
 
-    # Save all proposals
-    np.savez_compressed(proposals_npz_path, **all_proposals_dict)
-    print(f"All proposals saved to {proposals_npz_path}")
-
 if __name__ == "__main__":
     import argparse
+    import os
+
     parser = argparse.ArgumentParser()
-    parser.add_argument('--proposals_dir', type=str, required=True)
-    parser.add_argument('--annotations_dir', type=str, required=True)
-    parser.add_argument('--output_csv', type=str, required=True)
-    parser.add_argument('--proposals_npz', type=str, required=True,
-                        help="Path to save all proposals in compressed npz")
+    parser.add_argument('--method_name', type=str, required=True,
+                        choices=["selective_search", "edgeboxes"],
+                        help="Region proposal method to evaluate")
     parser.add_argument('--max_proposals', type=int, default=2000)
-    parser.add_argument('--step', type=int, default=10)
-    parser.add_argument('--method_name', type=str, default="selective_search")
+    parser.add_argument('--step', type=int, default=50)
     args = parser.parse_args()
 
+    # Modular paths based on method_name
+    proposals_dir = os.path.join("data/proposals", args.method_name)
+    annotations_dir = "/dtu/datasets1/02516/potholes/annotations"
+    save_dir = os.path.join("data/metrics", args.method_name)
+
+    os.makedirs(save_dir, exist_ok=True)
+
     main(
-        proposals_dir=args.proposals_dir,
-        annotations_dir=args.annotations_dir,
-        output_csv=args.output_csv,
-        proposals_npz_path=args.proposals_npz,
+        proposals_dir=proposals_dir,
+        annotations_dir=annotations_dir,
+        save_dir=save_dir,
         max_proposals=args.max_proposals,
         step=args.step,
         method_name=args.method_name

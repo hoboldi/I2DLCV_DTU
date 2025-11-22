@@ -1,68 +1,87 @@
-# edgebox_canny_sobel.py
+# edgebox_canny_parallel.py
 import os
 import cv2
 import numpy as np
 from tqdm import tqdm
+from multiprocessing import Pool
 
-#IMPORTANT: if you want to run this file you need to extract the opencv SED model and copy it into the data folder of region proposal
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "data", "model.yml.gz")
-sed = cv2.ximgproc.createStructuredEdgeDetection(MODEL_PATH)
-edge_boxes = cv2.ximgproc.createEdgeBoxes()  # you can set maxBoxes here or in getBoundingBoxes
+# ------------------------------
+# Worker initializer
+# ------------------------------
+def worker_init():
+    """Initialize EdgeBoxes once per process."""
+    global edge_boxes
+    edge_boxes = cv2.ximgproc.createEdgeBoxes()
+    edge_boxes.setAlpha(0.65)
+    edge_boxes.setBeta(0.75)
+    # maxBoxes will be set per image
 
-def extract_edgebox_proposals(img_path, max_proposals=2000, resize_to=None):
-    # Read image
+# ------------------------------
+# Helper functions
+# ------------------------------
+def compute_orientation_map(gray):
+    """Compute edge orientation map using Sobel gradients."""
+    gx = cv2.Sobel(gray.astype(np.float32), cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3)
+    return np.arctan2(gy, gx)
+
+def process_image(args):
+    """Process one image and save EdgeBoxes proposals."""
+    img_path, save_dir, max_proposals = args
+
     img = cv2.imread(img_path)
-    orig_h, orig_w = img.shape[:2]
+    if img is None:
+        print(f"Warning: could not read {img_path}")
+        return
 
-    # Optional resize for speed
-    if resize_to is not None:
-        img = cv2.resize(img, resize_to)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150).astype(np.float32) / 255.0
+    orientation_map = compute_orientation_map(gray)
 
-    img_float = img.astype(np.float32) / 255.0
-
-    # Structured Edge Detection
-    edges = sed.detectEdges(img_float)
-    orientation_map = sed.computeOrientation(edges)
-
-    # Get EdgeBoxes proposals
     edge_boxes.setMaxBoxes(max_proposals)
     boxes, scores = edge_boxes.getBoundingBoxes(edges, orientation_map)
 
-    # Convert to numpy array [x1, y1, x2, y2]
-    proposals = []
-    for (box, score) in zip(boxes, scores):
-        x, y, w, h = box
-        # Scale back if needed
-        if resize_to is not None:
-            scale_x = orig_w / resize_to[0]
-            scale_y = orig_h / resize_to[1]
-            x = int(x * scale_x)
-            y = int(y * scale_y)
-            w = int(w * scale_x)
-            h = int(h * scale_y)
-        proposals.append([x, y, x + w, y + h, score])
+    if len(boxes) == 0:
+        proposals = np.zeros((0,5), dtype=np.float32)
+    else:
+        proposals = np.hstack([
+            np.array(boxes, dtype=np.int32),
+            np.array(scores, dtype=np.float32).reshape(-1,1)
+        ])
 
-    proposals = np.array(proposals)
-    return np.array(proposals)
+    save_path = os.path.join(save_dir, os.path.splitext(os.path.basename(img_path))[0] + ".npy")
+    np.save(save_path, proposals)
 
-
-def main(images_dir, save_dir, max_proposals=2000, resize_to=None):
+# ------------------------------
+# Main function
+# ------------------------------
+def main(images_dir, save_dir, max_proposals=2000, num_workers=4):
     os.makedirs(save_dir, exist_ok=True)
-    image_files = sorted([f for f in os.listdir(images_dir) if f.lower().endswith(('.jpg', '.png'))])
+    image_files = sorted([os.path.join(images_dir, f)
+                          for f in os.listdir(images_dir)
+                          if f.lower().endswith(('.jpg', '.png'))])
 
-    for img_file in tqdm(image_files):
-        img_path = os.path.join(images_dir, img_file)
-        proposals = extract_edgebox_proposals(img_path, max_proposals=max_proposals, resize_to=resize_to)
+    args_list = [(img_path, save_dir, max_proposals) for img_path in image_files]
 
-        save_path = os.path.join(save_dir, os.path.splitext(img_file)[0] + ".npy")
-        np.save(save_path, proposals)
+    # Multiprocessing pool with initializer
+    with Pool(processes=num_workers, initializer=worker_init) as pool:
+        list(tqdm(pool.imap_unordered(process_image, args_list), total=len(image_files)))
 
+# ------------------------------
+# CLI
+# ------------------------------
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--images_dir', type=str, default="/dtu/datasets1/02516/potholes/images")
     parser.add_argument('--save_dir', type=str, default="data/proposals/edgeboxes")
     parser.add_argument('--max_proposals', type=int, default=2000)
+    parser.add_argument('--num_workers', type=int, default=4)
     args = parser.parse_args()
 
-    main(args.images_dir, args.save_dir, args.max_proposals)
+    main(
+        images_dir=args.images_dir,
+        save_dir=args.save_dir,
+        max_proposals=args.max_proposals,
+        num_workers=args.num_workers
+    )

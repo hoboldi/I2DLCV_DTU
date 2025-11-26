@@ -1,3 +1,5 @@
+
+
 # Helper functions
 
 def parse_voc_xml(xml_path):
@@ -35,6 +37,8 @@ def iou(boxA, boxB):
 
     union = boxAArea + boxBArea - interArea
     return interArea / union if union > 0 else 0
+
+
 class PotholeDataset(Dataset):
     def __init__(self, root, proposal_dir, img_ids,
                  proposals_per_image=64,
@@ -149,4 +153,5 @@ class PotholeDataset(Dataset):
             labels = [0]
 
         return torch.stack(crops), torch.tensor(labels), img_id, box
+
 

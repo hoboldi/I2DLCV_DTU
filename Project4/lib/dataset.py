@@ -1,3 +1,40 @@
+# Helper functions
+
+def parse_voc_xml(xml_path):
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    objects = []
+
+    for obj in root.findall("object"):
+        cls = obj.find("name").text
+        bnd = obj.find("bndbox")
+        xmin = int(bnd.find("xmin").text)
+        ymin = int(bnd.find("ymin").text)
+        xmax = int(bnd.find("xmax").text)
+        ymax = int(bnd.find("ymax").text)
+        objects.append({
+            "class": cls,
+            "bbox": [xmin, ymin, xmax, ymax]
+        })
+
+    return objects
+
+
+def iou(boxA, boxB):
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[2], boxB[2])
+    yB = min(boxA[3], boxB[3])
+
+    interW = max(0, xB - xA + 1)
+    interH = max(0, yB - yA + 1)
+    interArea = interW * interH
+
+    boxAArea = (boxA[2] - boxA[0] + 1) * (boxA[3] - boxA[1] + 1)
+    boxBArea = (boxB[2] - boxB[0] + 1) * (boxB[3] - boxB[1] + 1)
+
+    union = boxAArea + boxBArea - interArea
+    return interArea / union if union > 0 else 0
 class PotholeDataset(Dataset):
     def __init__(self, root, proposal_dir, img_ids,
                  proposals_per_image=64,
@@ -112,3 +149,4 @@ class PotholeDataset(Dataset):
             labels = [0]
 
         return torch.stack(crops), torch.tensor(labels), img_id, box
+
